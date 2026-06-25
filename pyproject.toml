@@ -1,0 +1,46 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "gotcha"
+version = "0.1.0"
+description = "A local-first ML trust-audit tool"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "scikit-learn",
+    "pandas",
+    "numpy",
+    "deepchecks",
+    "typer[all]>=0.12",
+    "pydantic",
+    "pyyaml",
+    "jinja2",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "ruff",
+    "mypy",
+]
+
+[project.scripts]
+gotcha = "gotcha.cli:app"
+
+[tool.ruff]
+target-version = "py310"
+line-length = 88
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP"]
+ignore = ["E501"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["gotcha"]
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
+ignore_missing_imports = true
