@@ -16,14 +16,14 @@ import time
 import numpy as np
 from sklearn.ensemble import RandomForestClassifier
 
-from gotcha.benchmark.fixtures import make_clean_dataset
-from gotcha.benchmark.injectors import (
+from zekan.benchmark.fixtures import make_clean_dataset
+from zekan.benchmark.injectors import (
     inject_covariate_drift, inject_concept_drift,
     inject_future_feature, inject_correlated_leaks,
 )
-from gotcha.config.schema import GotchaConfig, SplitPolicy
-from gotcha.contract.prediction_contract import PredictionContract
-from gotcha.severity.engine import (
+from zekan.config.schema import ZekanConfig, SplitPolicy
+from zekan.contract.prediction_contract import PredictionContract
+from zekan.severity.engine import (
     _NSL_NOTE_THRESHOLD, _NSL_WARN_THRESHOLD, _NULL_ALPHA, _NSL_EPS,
     FIXABLE_LEAKAGE_CLEAR_LEAK,
     leakage_issue_record, run_severity_analysis,
@@ -51,7 +51,7 @@ def _contract(**kw):
 
 
 def _config(contract):
-    return GotchaConfig(
+    return ZekanConfig(
         contract=contract,
         split_policy=SplitPolicy(
             n_splits=5,

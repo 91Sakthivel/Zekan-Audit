@@ -8,8 +8,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from gotcha.contract.contract_checks import CheckStatus, validate_contract
-from gotcha.contract.prediction_contract import PredictionContract
+from zekan.contract.contract_checks import CheckStatus, validate_contract
+from zekan.contract.prediction_contract import PredictionContract
 
 
 # ── fixture helpers ───────────────────────────────────────────────────────────
@@ -55,7 +55,7 @@ def _make_contract(**overrides: object) -> PredictionContract:
         available_features_until="snapshot_date",
         forbidden_after_prediction=[],
         schema_version="1",
-        gotcha_version="0.1.0",
+        zekan_version="0.1.0",
     )
     defaults.update(overrides)
     return PredictionContract(**defaults)
@@ -103,6 +103,16 @@ def test_too_few_time_periods_blocks_severity():
     check = next(c for c in result.checks if c.name == "temporal_periods_count")
     assert check.status in (CheckStatus.WARN, CheckStatus.FAIL)
     assert not result.can_compute_severity
+
+
+def test_class_balance_message_has_no_numpy_types():
+    """Count dict in the balance check message must use plain ints, not np.int64."""
+    df = _make_df()
+    result = validate_contract(_make_contract(), df)
+    check = next(c for c in result.checks if c.name == "target_class_balance")
+    assert check.status == CheckStatus.PASS
+    assert "np.int64" not in check.message
+    assert "int64" not in check.message
 
 
 def test_available_features_until_after_prediction_time_fails():

@@ -16,8 +16,8 @@ from dataclasses import replace
 
 import pytest
 
-from gotcha.detectors.schema import IssueType, SourceLayer
-from gotcha.severity.engine import (
+from zekan.detectors.schema import IssueType, SourceLayer
+from zekan.severity.engine import (
     _NULL_ALPHA, _NSL_NOTE_THRESHOLD, _NSL_WARN_THRESHOLD,
     SeverityResult,
     _leakage_status,

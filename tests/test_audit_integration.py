@@ -15,12 +15,12 @@ import numpy as np
 import pytest
 from sklearn.ensemble import RandomForestClassifier
 
-from gotcha.benchmark.fixtures import make_clean_dataset
-from gotcha.benchmark.injectors import inject_label_proxy
-from gotcha.config.schema import GotchaConfig
-from gotcha.contract.prediction_contract import PredictionContract
-from gotcha.severity.audit import run_audit
-from gotcha.severity.verdict import VerdictReport
+from zekan.benchmark.fixtures import make_clean_dataset
+from zekan.benchmark.injectors import inject_label_proxy
+from zekan.config.schema import ZekanConfig
+from zekan.contract.prediction_contract import PredictionContract
+from zekan.severity.audit import run_audit
+from zekan.severity.verdict import VerdictReport
 
 
 # ── Shared helpers ────────────────────────────────────────────────────────────
@@ -59,7 +59,7 @@ def pass_report():
     df["noise_forbidden"] = np.random.default_rng(42).standard_normal(size=len(df))
     contract = _noise_contract()
     return run_audit(
-        df, contract, GotchaConfig(contract=contract),
+        df, contract, ZekanConfig(contract=contract),
         model_factory=_fast_clf, n_permutations=0,
     )
 
@@ -71,7 +71,7 @@ def unconfirmed_report():
     df_leaky, _ = inject_label_proxy(df_clean, flip_rate=0.05, seed=0)
     contract = _proxy_contract()
     return run_audit(
-        df_leaky, contract, GotchaConfig(contract=contract),
+        df_leaky, contract, ZekanConfig(contract=contract),
         model_factory=_fast_clf, n_permutations=0,
     )
 
@@ -83,7 +83,7 @@ def fail_report():
     df_leaky, _ = inject_label_proxy(df_clean, flip_rate=0.05, seed=0)
     contract = _proxy_contract()
     return run_audit(
-        df_leaky, contract, GotchaConfig(contract=contract),
+        df_leaky, contract, ZekanConfig(contract=contract),
         model_factory=_fast_clf, n_permutations=100,
     )
 

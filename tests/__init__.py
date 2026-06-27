@@ -1,1 +1,1 @@
-"""Gotcha test suite."""
+"""Zekan test suite."""

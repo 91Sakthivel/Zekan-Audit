@@ -16,15 +16,15 @@ import numpy as np
 import pandas as pd
 from sklearn.ensemble import RandomForestClassifier
 
-from gotcha.benchmark.fixtures import make_clean_dataset
-from gotcha.benchmark.injectors import (
+from zekan.benchmark.fixtures import make_clean_dataset
+from zekan.benchmark.injectors import (
     inject_concept_drift,
     inject_covariate_drift,
     inject_future_feature,
 )
-from gotcha.config.schema import GotchaConfig, SplitPolicy
-from gotcha.contract.prediction_contract import PredictionContract
-from gotcha.severity.engine import run_severity_analysis
+from zekan.config.schema import ZekanConfig, SplitPolicy
+from zekan.contract.prediction_contract import PredictionContract
+from zekan.severity.engine import run_severity_analysis
 
 
 def _fast_clf() -> RandomForestClassifier:
@@ -43,8 +43,8 @@ def _make_contract(**kwargs) -> PredictionContract:
     return PredictionContract(**defaults)
 
 
-def _make_config(contract: PredictionContract) -> GotchaConfig:
-    return GotchaConfig(
+def _make_config(contract: PredictionContract) -> ZekanConfig:
+    return ZekanConfig(
         contract=contract,
         split_policy=SplitPolicy(
             n_splits=5,

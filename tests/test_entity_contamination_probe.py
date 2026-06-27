@@ -4,7 +4,7 @@ Key invariants under test
 --------------------------
 Cross-sectional data (every entity in exactly one period) -> status='pass'; must NOT fire.
 Longitudinal data (entity recurs across >1 period) -> status='warn', confirmed=False.
-Wording is conditional throughout: "WOULD" / "random" / "Gotcha evaluates under".
+Wording is conditional throughout: "WOULD" / "random" / "Zekan evaluates under".
 Messages must NOT imply user fault: "wrong split", "you leaked", "contaminated",
 "split strategy detected".
 Robustness: missing column -> 'unavailable'; nulls dropped deterministically; no crash.
@@ -14,10 +14,10 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
-from gotcha.benchmark.fixtures import make_clean_dataset
-from gotcha.contract.prediction_contract import PredictionContract
-from gotcha.detectors.entity_contamination_risk import probe_entity_contamination_risk
-from gotcha.detectors.schema import (
+from zekan.benchmark.fixtures import make_clean_dataset
+from zekan.contract.prediction_contract import PredictionContract
+from zekan.detectors.entity_contamination_risk import probe_entity_contamination_risk
+from zekan.detectors.schema import (
     EntityContaminationRiskDetail,
     EvidenceScope,
     ImpactType,
@@ -258,10 +258,10 @@ class TestWording:
         result = probe_entity_contamination_risk(_longitudinal_df(), _contract())
         assert "random" in self._all_narrative(result).lower()
 
-    def test_warn_references_gotcha_contract(self):
-        """Must acknowledge that Gotcha's own evaluation avoids this risk."""
+    def test_warn_references_zekan_contract(self):
+        """Must acknowledge that Zekan's own evaluation avoids this risk."""
         result = probe_entity_contamination_risk(_longitudinal_df(), _contract())
-        assert "Gotcha evaluates under" in result.why
+        assert "Zekan evaluates under" in result.why
 
     def test_pass_narrative_is_clean(self):
         """Even the pass record must not contain accusatory language."""

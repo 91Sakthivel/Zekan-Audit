@@ -14,15 +14,15 @@ import time
 import numpy as np
 from sklearn.ensemble import RandomForestClassifier
 
-from gotcha.benchmark.fixtures import make_clean_dataset
-from gotcha.benchmark.injectors import (
+from zekan.benchmark.fixtures import make_clean_dataset
+from zekan.benchmark.injectors import (
     inject_covariate_drift, inject_concept_drift,
     inject_future_feature, inject_correlated_leaks,
 )
-from gotcha.config.schema import GotchaConfig, SplitPolicy
-from gotcha.contract.prediction_contract import PredictionContract
-from gotcha.severity.engine import run_severity_analysis, FIXABLE_LEAKAGE_CLEAR_LEAK
-from gotcha.severity.null_baseline import estimate_fixable_leakage_null
+from zekan.config.schema import ZekanConfig, SplitPolicy
+from zekan.contract.prediction_contract import PredictionContract
+from zekan.severity.engine import run_severity_analysis, FIXABLE_LEAKAGE_CLEAR_LEAK
+from zekan.severity.null_baseline import estimate_fixable_leakage_null
 
 SEP = "=" * 76
 SEEDS = [1, 2, 3, 7, 13, 17, 42, 99, 123, 999]
@@ -46,7 +46,7 @@ def _contract(**kw):
 
 
 def _config(contract):
-    return GotchaConfig(
+    return ZekanConfig(
         contract=contract,
         split_policy=SplitPolicy(
             n_splits=5,

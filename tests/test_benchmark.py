@@ -33,16 +33,16 @@ from __future__ import annotations
 import pytest
 from sklearn.ensemble import RandomForestClassifier
 
-from gotcha.benchmark.fixtures import make_clean_dataset
-from gotcha.benchmark.injectors import (
+from zekan.benchmark.fixtures import make_clean_dataset
+from zekan.benchmark.injectors import (
     inject_concept_drift,
     inject_correlated_leaks,
     inject_covariate_drift,
     inject_future_feature,
 )
-from gotcha.config.schema import GotchaConfig, SplitPolicy
-from gotcha.contract.prediction_contract import PredictionContract
-from gotcha.severity.engine import run_severity_analysis
+from zekan.config.schema import ZekanConfig, SplitPolicy
+from zekan.contract.prediction_contract import PredictionContract
+from zekan.severity.engine import run_severity_analysis
 
 
 def _fast_clf() -> RandomForestClassifier:
@@ -61,8 +61,8 @@ def _make_contract(**kwargs) -> PredictionContract:
     return PredictionContract(**defaults)
 
 
-def _make_config(contract: PredictionContract, leak_lookahead: int = 1) -> GotchaConfig:
-    return GotchaConfig(
+def _make_config(contract: PredictionContract, leak_lookahead: int = 1) -> ZekanConfig:
+    return ZekanConfig(
         contract=contract,
         split_policy=SplitPolicy(
             n_splits=5,
@@ -195,9 +195,9 @@ def test_case3_status_not_pass(case3_result) -> None:
 
 def test_case4_correlated_leaks_cumulative_warning(base_df) -> None:
     """Correlated leak pair should fire the one-at-a-time understatement warning."""
-    from gotcha.severity.ablation import run_ablation
-    from gotcha.severity.metrics import evaluate_folds
-    from gotcha.severity.splitters import temporal_expanding_folds
+    from zekan.severity.ablation import run_ablation
+    from zekan.severity.metrics import evaluate_folds
+    from zekan.severity.splitters import temporal_expanding_folds
 
     df_leak, record = inject_correlated_leaks(base_df)
     forbidden = record.planted_columns  # [corr_leak_alpha, corr_leak_beta]

@@ -3,17 +3,17 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import roc_auc_score
 import pandas as pd
 
-from gotcha.benchmark.fixtures import make_clean_dataset
-from gotcha.benchmark.injectors import (
+from zekan.benchmark.fixtures import make_clean_dataset
+from zekan.benchmark.injectors import (
     inject_correlated_leaks, inject_future_feature,
     inject_covariate_drift, inject_concept_drift,
 )
-from gotcha.config.schema import GotchaConfig, SplitPolicy
-from gotcha.contract.prediction_contract import PredictionContract
-from gotcha.severity.ablation import run_ablation
-from gotcha.severity.engine import run_severity_analysis, FIXABLE_LEAKAGE_CLEAR_LEAK
-from gotcha.severity.metrics import evaluate_folds
-from gotcha.severity.splitters import temporal_expanding_folds
+from zekan.config.schema import ZekanConfig, SplitPolicy
+from zekan.contract.prediction_contract import PredictionContract
+from zekan.severity.ablation import run_ablation
+from zekan.severity.engine import run_severity_analysis, FIXABLE_LEAKAGE_CLEAR_LEAK
+from zekan.severity.metrics import evaluate_folds
+from zekan.severity.splitters import temporal_expanding_folds
 
 SEP = "=" * 72
 
@@ -33,7 +33,7 @@ def _make_contract(**kwargs):
 
 
 def _make_config(contract, leak_lookahead=1):
-    return GotchaConfig(
+    return ZekanConfig(
         contract=contract,
         split_policy=SplitPolicy(
             n_splits=5, min_test_rows_per_fold=50,

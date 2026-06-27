@@ -10,8 +10,8 @@ import math
 import numpy as np
 import pytest
 
-from gotcha.severity.engine import PerFoldSeverity, SeverityResult
-from gotcha.severity.verdict import (
+from zekan.severity.engine import PerFoldSeverity, SeverityResult
+from zekan.severity.verdict import (
     _DEFAULT_FAIL_FLOOR,
     _DEFAULT_WARN_FLOOR,
     FoldCI,

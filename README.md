@@ -1,11 +1,11 @@
-# Gotcha
+# Zekan
 
-Gotcha — a local-first ML trust-audit tool. Measures data-leakage severity, ranks fixes by business cost, and proves repairs. v1: binary classification, tabular, table-first.
+Zekan — a local-first ML trust-audit tool. Measures data-leakage severity, ranks fixes by business cost, and proves repairs. v1: binary classification, tabular, table-first.
 
 ## Development
 
 This project uses a dedicated virtual environment to avoid interpreter ambiguity.
-Always activate `.venv` before working on gotcha — it is the one canonical interpreter.
+Always activate `.venv` before working on zekan — it is the one canonical interpreter.
 
 ```bash
 # Create (once)
@@ -32,7 +32,7 @@ pip install -e ".[dev]"
 ## Usage
 
 ```bash
-gotcha audit --data data.csv --config gotcha.yaml --model model.pkl
-gotcha benchmark
-gotcha report
+zekan audit --data data.csv --config zekan.yaml --model model.pkl
+zekan benchmark
+zekan report
 ```

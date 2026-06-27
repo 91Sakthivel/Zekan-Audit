@@ -25,8 +25,8 @@ env/
 .env/
 ENV/
 
-# Gotcha cache
-.gotcha/
+# Zekan cache
+.zekan/
 
 # Testing
 .pytest_cache/

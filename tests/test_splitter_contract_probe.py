@@ -4,7 +4,7 @@ Key invariants under test
 --------------------------
 Properly grouped folds (no entity in both train+test) -> status='pass'.
 Any entity spanning both partitions of a fold -> status='internal_fail', confirmed=True.
-Wording frames Gotcha as the source of a violation; no user-blame language.
+Wording frames Zekan as the source of a violation; no user-blame language.
 Robustness: empty folds, all-skipped folds, missing column -> 'unavailable'; no crash.
 Skipped folds never contribute to the violation check.
 """
@@ -14,8 +14,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from gotcha.contract.prediction_contract import PredictionContract
-from gotcha.detectors.schema import (
+from zekan.contract.prediction_contract import PredictionContract
+from zekan.detectors.schema import (
     EvidenceScope,
     ImpactType,
     IssueSeverity,
@@ -23,8 +23,8 @@ from gotcha.detectors.schema import (
     SourceLayer,
     SplitterContractViolationDetail,
 )
-from gotcha.detectors.splitter_contract_probe import probe_splitter_contract_violation
-from gotcha.severity.splitters import FoldIndices, FoldMeta
+from zekan.detectors.splitter_contract_probe import probe_splitter_contract_violation
+from zekan.severity.splitters import FoldIndices, FoldMeta
 
 
 # ── Shared helpers ────────────────────────────────────────────────────────────
@@ -273,11 +273,11 @@ class TestSchemaFields:
         )
         assert result.issue_type == IssueType.SPLITTER_CONTRACT_VIOLATION
 
-    def test_source_layer_gotcha_integrity(self):
+    def test_source_layer_zekan_integrity(self):
         result = probe_splitter_contract_violation(
             [_violated_fold()], _entity_df(), _contract()
         )
-        assert result.source_layer == SourceLayer.GOTCHA_INTEGRITY
+        assert result.source_layer == SourceLayer.ZEKAN_INTEGRITY
 
     def test_severity_critical(self):
         result = probe_splitter_contract_violation(
@@ -316,16 +316,16 @@ class TestSchemaFields:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 class TestWording:
-    """The probe accuses Gotcha, not the user.  Verified against all narrative fields."""
+    """The probe accuses Zekan, not the user.  Verified against all narrative fields."""
 
     def _narrative(self, result) -> str:
         return " ".join([result.what, result.why, result.how_much, result.next_fix])
 
-    def test_fail_mentions_gotcha(self):
+    def test_fail_mentions_zekan(self):
         result = probe_splitter_contract_violation(
             [_violated_fold()], _entity_df(), _contract()
         )
-        assert "Gotcha" in self._narrative(result)
+        assert "Zekan" in self._narrative(result)
 
     def test_fail_no_user_blame_language(self):
         result = probe_splitter_contract_violation(
@@ -341,7 +341,7 @@ class TestWording:
         result = probe_splitter_contract_violation(
             [_violated_fold()], _entity_df(), _contract()
         )
-        assert "internal" in result.what.lower() or "Gotcha" in result.what
+        assert "internal" in result.what.lower() or "Zekan" in result.what
 
     def test_pass_no_blame_language(self):
         result = probe_splitter_contract_violation(

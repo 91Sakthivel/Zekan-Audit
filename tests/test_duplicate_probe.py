@@ -22,17 +22,17 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from gotcha.benchmark.fixtures import make_clean_dataset
-from gotcha.contract.prediction_contract import PredictionContract
-from gotcha.detectors.duplicate_probe import probe_cross_fold_duplicates, probe_raw_duplicates
-from gotcha.detectors.schema import (
+from zekan.benchmark.fixtures import make_clean_dataset
+from zekan.contract.prediction_contract import PredictionContract
+from zekan.detectors.duplicate_probe import probe_cross_fold_duplicates, probe_raw_duplicates
+from zekan.detectors.schema import (
     CrossFoldDuplicateDetail,
     IssueSeverity,
     IssueType,
     RowDuplicationDetail,
     SourceLayer,
 )
-from gotcha.severity.splitters import FoldIndices, FoldMeta
+from zekan.severity.splitters import FoldIndices, FoldMeta
 
 
 # ── Shared helpers ────────────────────────────────────────────────────────────
@@ -346,8 +346,8 @@ class TestProbeCrossFoldDuplicates:
 
     def test_clean_folds_passes(self):
         """End-to-end: temporal folds on clean data -> no content overlap -> PASS."""
-        from gotcha.config.schema import GotchaConfig, SplitPolicy
-        from gotcha.severity.splitters import temporal_expanding_folds
+        from zekan.config.schema import ZekanConfig, SplitPolicy
+        from zekan.severity.splitters import temporal_expanding_folds
 
         df = make_clean_dataset(n_entities=100, snapshots_per_entity=5, seed=0)
         contract = _contract()
@@ -360,7 +360,7 @@ class TestProbeCrossFoldDuplicates:
         assert result.status == "pass"
 
     def test_clean_folds_zero_count(self):
-        from gotcha.severity.splitters import temporal_expanding_folds
+        from zekan.severity.splitters import temporal_expanding_folds
         df = make_clean_dataset(n_entities=100, snapshots_per_entity=5, seed=1)
         contract = _contract()
         folds = temporal_expanding_folds(
@@ -461,7 +461,7 @@ class TestProbeCrossFoldDuplicates:
         assert isinstance(result.evidence.structural_detail, CrossFoldDuplicateDetail)
 
     def test_pass_has_correct_issue_type(self):
-        from gotcha.severity.splitters import temporal_expanding_folds
+        from zekan.severity.splitters import temporal_expanding_folds
         df = make_clean_dataset(n_entities=100, snapshots_per_entity=5, seed=2)
         folds = temporal_expanding_folds(
             df, time_col="prediction_time", entity_col="entity_id",

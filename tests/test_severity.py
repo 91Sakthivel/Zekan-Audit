@@ -7,10 +7,10 @@ import math
 import pytest
 from sklearn.ensemble import RandomForestClassifier
 
-from gotcha.benchmark.fixtures import make_clean_dataset
-from gotcha.config.schema import GotchaConfig, SplitPolicy
-from gotcha.contract.prediction_contract import PredictionContract
-from gotcha.severity.engine import SeverityResult, run_severity_analysis
+from zekan.benchmark.fixtures import make_clean_dataset
+from zekan.config.schema import ZekanConfig, SplitPolicy
+from zekan.contract.prediction_contract import PredictionContract
+from zekan.severity.engine import SeverityResult, run_severity_analysis
 
 
 def _fast_clf() -> RandomForestClassifier:
@@ -29,8 +29,8 @@ def _make_contract(**kwargs) -> PredictionContract:
     return PredictionContract(**defaults)
 
 
-def _make_config(contract: PredictionContract) -> GotchaConfig:
-    return GotchaConfig(
+def _make_config(contract: PredictionContract) -> ZekanConfig:
+    return ZekanConfig(
         contract=contract,
         split_policy=SplitPolicy(
             n_splits=5,
@@ -135,8 +135,8 @@ def test_empty_forbidden_zero_fixable_leakage(
 def test_top_k_enforcement() -> None:
     """Ablation must respect top_k and mark excess candidates as not_ablated."""
     import pandas as pd
-    from gotcha.severity.ablation import run_ablation
-    from gotcha.severity.splitters import temporal_expanding_folds
+    from zekan.severity.ablation import run_ablation
+    from zekan.severity.splitters import temporal_expanding_folds
 
     df = make_clean_dataset(n_entities=200, snapshots_per_entity=5, seed=42)
     feature_cols = [c for c in df.columns if c.startswith("feature_")]

@@ -17,15 +17,15 @@ import pandas as pd
 import pytest
 from sklearn.ensemble import RandomForestClassifier
 
-from gotcha.benchmark.fixtures import make_clean_dataset
-from gotcha.benchmark.injectors import inject_covariate_drift
-from gotcha.config.schema import GotchaConfig, SplitPolicy
-from gotcha.contract.prediction_contract import PredictionContract
-from gotcha.detectors.duplicate_probe import probe_cross_fold_duplicates, probe_raw_duplicates
-from gotcha.detectors.entity_contamination_risk import probe_entity_contamination_risk
-from gotcha.detectors.splitter_contract_probe import probe_splitter_contract_violation
-from gotcha.severity.engine import run_severity_analysis
-from gotcha.severity.splitters import FoldIndices, FoldMeta
+from zekan.benchmark.fixtures import make_clean_dataset
+from zekan.benchmark.injectors import inject_covariate_drift
+from zekan.config.schema import ZekanConfig, SplitPolicy
+from zekan.contract.prediction_contract import PredictionContract
+from zekan.detectors.duplicate_probe import probe_cross_fold_duplicates, probe_raw_duplicates
+from zekan.detectors.entity_contamination_risk import probe_entity_contamination_risk
+from zekan.detectors.splitter_contract_probe import probe_splitter_contract_violation
+from zekan.severity.engine import run_severity_analysis
+from zekan.severity.splitters import FoldIndices, FoldMeta
 
 
 # ── Shared helpers ────────────────────────────────────────────────────────────
@@ -42,9 +42,9 @@ def _contract(**kw) -> PredictionContract:
     return PredictionContract(**defaults)
 
 
-def _make_config(contract: PredictionContract) -> GotchaConfig:
+def _make_config(contract: PredictionContract) -> ZekanConfig:
     """Reduced fold minimums so 1000-row datasets produce valid folds."""
-    return GotchaConfig(
+    return ZekanConfig(
         contract=contract,
         split_policy=SplitPolicy(
             n_splits=5,

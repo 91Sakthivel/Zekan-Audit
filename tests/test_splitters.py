@@ -7,8 +7,8 @@ import pandas as pd
 import pytest
 from sklearn.ensemble import RandomForestClassifier
 
-from gotcha.benchmark.fixtures import make_clean_dataset
-from gotcha.benchmark.injectors import (
+from zekan.benchmark.fixtures import make_clean_dataset
+from zekan.benchmark.injectors import (
     inject_covariate_drift,
     inject_concept_drift,
     inject_correlated_leaks,
@@ -16,8 +16,8 @@ from gotcha.benchmark.injectors import (
     inject_label_proxy,
     inject_presplit_artifact,
 )
-from gotcha.severity.metrics import evaluate_folds
-from gotcha.severity.splitters import (
+from zekan.severity.metrics import evaluate_folds
+from zekan.severity.splitters import (
     FoldIndices,
     random_grouped_folds,
     temporal_expanding_folds,
