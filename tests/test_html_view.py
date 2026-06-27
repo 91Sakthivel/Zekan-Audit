@@ -422,3 +422,64 @@ def test_feature_translation_parity_inconclusive_unconfirmed():
     assert "could not be statistically confirmed" in html_out
     assert "that is why the results look better than they really are" not in text_out
     assert "that is why the results look better than they really are" not in html_out
+
+
+# ── Cause-appropriate INCONCLUSIVE guidance ───────────────────────────────────
+
+class _FakeAnnotation:
+    what = "Structural pattern detected: entity-level aggregate."
+
+
+def _unconfirmed_structural_report() -> VerdictReport:
+    report = _unconfirmed_report()
+    return report.model_copy(update={"structural_annotations": [_FakeAnnotation()]})
+
+
+def test_html_inconclusive_statistical_guidance():
+    out = render_verdict_html(_unconfirmed_report())
+    assert "Add more time periods" in out
+    assert "Adding more data will not resolve this" not in out
+
+
+def test_html_inconclusive_structural_guidance():
+    out = render_verdict_html(_unconfirmed_structural_report())
+    assert "Adding more data will not resolve this" in out
+    assert "Add more time periods" not in out
+
+
+def test_no_sample_count_in_html_statistical_inconclusive():
+    out = render_verdict_html(_unconfirmed_report())
+    assert "samples" not in out
+
+
+def test_no_sample_count_in_html_structural_inconclusive():
+    out = render_verdict_html(_unconfirmed_structural_report())
+    assert "samples" not in out
+
+
+def test_parity_statistical_guidance():
+    """Same statistical phrase in both text and HTML when no annotations."""
+    report = _unconfirmed_report()
+    text_out = render_verdict(report, stream=_Utf8Stream())
+    html_out = render_verdict_html(report)
+    assert "Add more time periods" in text_out
+    assert "Add more time periods" in html_out
+
+
+def test_parity_structural_guidance():
+    """Same structural phrase in both text and HTML when annotations present."""
+    report = _unconfirmed_structural_report()
+    text_out = render_verdict(report, stream=_Utf8Stream())
+    html_out = render_verdict_html(report)
+    assert "Adding more data will not resolve this" in text_out
+    assert "Adding more data will not resolve this" in html_out
+
+
+def test_gather_more_data_absent_in_html_structural_render():
+    out = render_verdict_html(_unconfirmed_structural_report())
+    assert "Gather more data" not in out
+
+
+def test_gather_more_data_absent_in_html_statistical_render():
+    out = render_verdict_html(_unconfirmed_report())
+    assert "Gather more data" not in out

@@ -151,7 +151,11 @@ def _render_inconclusive(
             lines.append(f"  {ann.what}")
 
     lines.append("")
-    lines.append(_MSG.ACTION_INCONCLUSIVE)
+    lines.append(_MSG.ACTION_INCONCLUSIVE_OPENER)
+    if annotations:
+        lines.append(_MSG.ACTION_INCONCLUSIVE_STRUCTURAL)
+    else:
+        lines.append(_MSG.ACTION_INCONCLUSIVE_STATISTICAL)
     lines.append("")
     lines.append(_DIVIDER)
     lines.append(_MSG.FOOTER_INCONCLUSIVE)

@@ -41,9 +41,21 @@ ACTION_RISKY_FAILED_NO_ATTR = (
     "Investigate the flagged leakage before trusting this model."
 )
 
-ACTION_INCONCLUSIVE = (
-    "Do not treat this as trusted. Gather more data, tighten the contract, "
-    "or inspect the flagged feature manually, then re-run Zekan."
+ACTION_INCONCLUSIVE_OPENER = "Do not treat this as trusted."
+
+# Cause-specific diagnosis lines — branch on bool(annotations) at render time.
+# Rendered as: ACTION_INCONCLUSIVE_OPENER + one of the two lines below.
+ACTION_INCONCLUSIVE_STRUCTURAL = (
+    "Adding more data will not resolve this: the permutation test is blind "
+    "to a feature that is constant within each entity. Inspect how this "
+    "feature was created."
+)
+
+ACTION_INCONCLUSIVE_STATISTICAL = (
+    "A large effect was measured but could not be statistically confirmed. "
+    "This usually means too few time periods, or a signal the permutation "
+    "test could not separate from noise. Add more time periods, or inspect "
+    "the flagged feature before trusting this result."
 )
 
 # ── Per-worst-feature plain-English explanation ───────────────────────────────

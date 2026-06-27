@@ -195,7 +195,11 @@ def _html_inconclusive(
         for ann in annotations:
             parts.append(_p(html.escape(ann.what), _S_LEAD))
 
-    parts.append(_p(_MSG.ACTION_INCONCLUSIVE, _S_ACTION))
+    parts.append(_p(_MSG.ACTION_INCONCLUSIVE_OPENER, _S_ACTION))
+    if annotations:
+        parts.append(_p(_MSG.ACTION_INCONCLUSIVE_STRUCTURAL, _S_ACTION))
+    else:
+        parts.append(_p(_MSG.ACTION_INCONCLUSIVE_STATISTICAL, _S_ACTION))
     parts.append(_footer_block(_MSG.FOOTER_INCONCLUSIVE))
 
     return _wrap_outer(banner + _wrap_body("".join(parts)))

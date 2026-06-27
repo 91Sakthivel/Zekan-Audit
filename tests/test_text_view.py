@@ -422,3 +422,54 @@ def test_inconclusive_footer_not_a_pass():
     out = render_verdict(report, stream=_Utf8Stream())
     assert "Scope note" in out
     assert "not a pass" in out
+
+
+# ── Cause-appropriate INCONCLUSIVE guidance ───────────────────────────────────
+
+class _FakeAnnotation:
+    what = "Structural pattern detected: entity-level aggregate."
+
+
+def _unconfirmed_statistical_report():
+    sr = _severity_result(
+        fixable_leakage=0.20, p_value=None, nsl=None,
+        null_iqr=None, null_99th=None, n_permutations_run=0,
+    )
+    return build_verdict(sr)
+
+
+def _unconfirmed_structural_report():
+    report = _unconfirmed_statistical_report()
+    return report.model_copy(update={"structural_annotations": [_FakeAnnotation()]})
+
+
+def test_inconclusive_statistical_guidance_when_no_annotations():
+    out = render_verdict(_unconfirmed_statistical_report(), stream=_Utf8Stream())
+    assert "Add more time periods" in out
+    assert "Adding more data will not resolve this" not in out
+
+
+def test_inconclusive_structural_guidance_when_annotations_present():
+    out = render_verdict(_unconfirmed_structural_report(), stream=_Utf8Stream())
+    assert "Adding more data will not resolve this" in out
+    assert "Add more time periods" not in out
+
+
+def test_no_sample_count_in_statistical_inconclusive():
+    out = render_verdict(_unconfirmed_statistical_report(), stream=_Utf8Stream())
+    assert "samples" not in out
+
+
+def test_no_sample_count_in_structural_inconclusive():
+    out = render_verdict(_unconfirmed_structural_report(), stream=_Utf8Stream())
+    assert "samples" not in out
+
+
+def test_gather_more_data_absent_in_structural_render():
+    out = render_verdict(_unconfirmed_structural_report(), stream=_Utf8Stream())
+    assert "Gather more data" not in out
+
+
+def test_gather_more_data_absent_in_statistical_render():
+    out = render_verdict(_unconfirmed_statistical_report(), stream=_Utf8Stream())
+    assert "Gather more data" not in out
