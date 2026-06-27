@@ -46,6 +46,9 @@ def _run_audit_pipeline(
     except ValidationError as exc:
         typer.echo(f"ERROR: invalid config:\n{exc}", err=True)
         raise typer.Exit(1)
+    except ValueError as e:
+        typer.echo(f"ERROR: invalid config: {e}")
+        raise typer.Exit(1)
 
     # ── load data ─────────────────────────────────────────────────────────────
     data_path = Path(data)

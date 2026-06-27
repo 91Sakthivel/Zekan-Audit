@@ -109,8 +109,18 @@ class ZekanConfig(BaseModel):
     severity: SeverityConfig = Field(default_factory=SeverityConfig)
 
 
+_KNOWN_WRONG_KEYS = {"prediction_contract", "zekan", "config", "gotcha"}
+
+
 def load_config(path: str | Path) -> ZekanConfig:
     """Load a ZekanConfig from a zekan.yml file."""
-    with open(path) as fh:
-        data = yaml.safe_load(fh)
+    with open(path, encoding="utf-8") as fh:
+        text = fh.read().lstrip('﻿')
+    data = yaml.safe_load(text)
+    if isinstance(data, dict) and "contract" not in data:
+        found = next((k for k in data if k in _KNOWN_WRONG_KEYS), None)
+        if found is not None:
+            raise ValueError(
+                f"unknown top-level key '{found}' — did you mean 'contract'?"
+            )
     return ZekanConfig(**data)

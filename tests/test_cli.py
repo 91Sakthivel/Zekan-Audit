@@ -332,3 +332,27 @@ def test_no_consecutive_blank_lines_with_gate(tmp_path, monkeypatch):
     assert consecutive_blanks == 0, (
         f"Found {consecutive_blanks} consecutive blank line pair(s) in output:\n{result.output!r}"
     )
+
+
+# ── Config error tests ────────────────────────────────────────────────────────
+
+def test_audit_wrong_top_level_key_exits_1_with_helpful_message(tmp_path):
+    """Config with 'prediction_contract:' key → exit 1, message names 'contract'."""
+    df = make_clean_dataset(n_entities=20, snapshots_per_entity=3, seed=0)
+    csv = tmp_path / "data.csv"
+    cfg = tmp_path / "zekan.yml"
+    df.to_csv(csv, index=False)
+    cfg.write_text(
+        "prediction_contract:\n"
+        "  prediction_problem: test\n"
+        "  entity_id: entity_id\n"
+        "  prediction_time: prediction_time\n"
+        "  target: target\n"
+        "  available_features_until: prediction_time\n",
+        encoding="utf-8",
+    )
+
+    result = runner.invoke(app, ["audit", "--data", str(csv), "--config", str(cfg)])
+
+    assert result.exit_code == 1
+    assert "did you mean 'contract'" in result.output
