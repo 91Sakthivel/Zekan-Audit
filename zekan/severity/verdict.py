@@ -267,6 +267,14 @@ class VerdictReport(BaseModel):
         from zekan.reports.html_view import render_verdict_html
         return render_verdict_html(self)
 
+    def to_dict(self) -> dict:
+        from zekan.reports.json_export import verdict_to_dict
+        return verdict_to_dict(self)
+
+    def to_json(self, *, indent: int | None = None) -> str:
+        from zekan.reports.json_export import verdict_to_json
+        return verdict_to_json(self, indent=indent)
+
 
 # ── Fold-CI computation (Phase 5) ─────────────────────────────────────────────
 

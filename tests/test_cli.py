@@ -1,5 +1,6 @@
 """Tests for the zekan CLI."""
 
+import json
 import textwrap
 
 import numpy as np
@@ -356,3 +357,154 @@ def test_audit_wrong_top_level_key_exits_1_with_helpful_message(tmp_path):
 
     assert result.exit_code == 1
     assert "did you mean 'contract'" in result.output
+
+
+# ── --json flag tests ─────────────────────────────────────────────────────────
+
+def test_json_stdout_is_parseable(tmp_path, monkeypatch):
+    """--json: stdout is valid JSON on a clean dataset."""
+    monkeypatch.setattr("zekan.severity.metrics._default_model_factory", _fast_clf)
+
+    df = make_clean_dataset(n_entities=_N_ENTITIES, snapshots_per_entity=_SNAPSHOTS, seed=1)
+    csv = tmp_path / "data.csv"
+    cfg = tmp_path / "zekan.yml"
+    df.to_csv(csv, index=False)
+    cfg.write_text(_CLEAN_CONFIG)
+
+    result = runner.invoke(app, ["audit", "--data", str(csv), "--config", str(cfg), "--json"])
+
+    assert result.exit_code == 0, result.output
+    parsed = json.loads(result.stdout)
+    assert isinstance(parsed, dict)
+
+
+def test_json_stdout_has_no_human_text(tmp_path, monkeypatch):
+    """--json: stdout contains no contract table, READY, or verdict banner lines."""
+    monkeypatch.setattr("zekan.severity.metrics._default_model_factory", _fast_clf)
+
+    df = make_clean_dataset(n_entities=_N_ENTITIES, snapshots_per_entity=_SNAPSHOTS, seed=1)
+    csv = tmp_path / "data.csv"
+    cfg = tmp_path / "zekan.yml"
+    df.to_csv(csv, index=False)
+    cfg.write_text(_CLEAN_CONFIG)
+
+    result = runner.invoke(app, ["audit", "--data", str(csv), "--config", str(cfg), "--json"])
+
+    stdout = result.stdout
+    assert "[PASS]" not in stdout
+    assert "READY:" not in stdout
+    assert "Zekan audit:" not in stdout
+    assert "TRUSTED" not in stdout  # verdict banner must not appear as human text in stdout
+
+
+def test_json_exit_code_unchanged_vs_non_json(tmp_path, monkeypatch):
+    """--json does not change exit code relative to a non-json run."""
+    monkeypatch.setattr("zekan.severity.metrics._default_model_factory", _fast_clf)
+
+    df = make_clean_dataset(n_entities=_N_ENTITIES, snapshots_per_entity=_SNAPSHOTS, seed=1)
+    csv = tmp_path / "data.csv"
+    cfg = tmp_path / "zekan.yml"
+    df.to_csv(csv, index=False)
+    cfg.write_text(_CLEAN_CONFIG)
+
+    plain = runner.invoke(app, ["audit", "--data", str(csv), "--config", str(cfg)])
+    json_run = runner.invoke(app, ["audit", "--data", str(csv), "--config", str(cfg), "--json"])
+
+    assert plain.exit_code == json_run.exit_code
+
+
+def test_json_schema_version(tmp_path, monkeypatch):
+    """--json: schema_version == '1' in the output."""
+    monkeypatch.setattr("zekan.severity.metrics._default_model_factory", _fast_clf)
+
+    df = make_clean_dataset(n_entities=_N_ENTITIES, snapshots_per_entity=_SNAPSHOTS, seed=1)
+    csv = tmp_path / "data.csv"
+    cfg = tmp_path / "zekan.yml"
+    df.to_csv(csv, index=False)
+    cfg.write_text(_CLEAN_CONFIG)
+
+    result = runner.invoke(app, ["audit", "--data", str(csv), "--config", str(cfg), "--json"])
+    parsed = json.loads(result.stdout)
+    assert parsed["schema_version"] == "1"
+
+
+def test_json_gate_null_without_flag(tmp_path, monkeypatch):
+    """--json without --fail-if-inflation-greater-than: gate is null."""
+    monkeypatch.setattr("zekan.severity.metrics._default_model_factory", _fast_clf)
+
+    df = make_clean_dataset(n_entities=_N_ENTITIES, snapshots_per_entity=_SNAPSHOTS, seed=1)
+    csv = tmp_path / "data.csv"
+    cfg = tmp_path / "zekan.yml"
+    df.to_csv(csv, index=False)
+    cfg.write_text(_CLEAN_CONFIG)
+
+    result = runner.invoke(app, ["audit", "--data", str(csv), "--config", str(cfg), "--json"])
+    parsed = json.loads(result.stdout)
+    assert parsed["gate"] is None
+
+
+def test_json_gate_triggered(tmp_path, monkeypatch):
+    """--json with gate triggered: gate.triggered=true, exit=1, gate.exit_code=1."""
+    monkeypatch.setattr("zekan.severity.metrics._default_model_factory", _fast_clf)
+
+    df_clean = make_clean_dataset(n_entities=_N_ENTITIES, snapshots_per_entity=_SNAPSHOTS, seed=1)
+    df_leaky, _ = inject_label_proxy(df_clean, flip_rate=0.05, seed=0)
+    csv = tmp_path / "data.csv"
+    cfg = tmp_path / "zekan.yml"
+    df_leaky.to_csv(csv, index=False)
+    cfg.write_text(_LEAKY_CONFIG)
+
+    result = runner.invoke(app, [
+        "audit", "--data", str(csv), "--config", str(cfg),
+        "--json", "--fail-if-inflation-greater-than", "0.20",
+    ])
+
+    assert result.exit_code == 1
+    parsed = json.loads(result.stdout)
+    assert parsed["gate"]["triggered"] is True
+    assert parsed["gate"]["exit_code"] == 1
+    assert parsed["gate"]["threshold"] == pytest.approx(0.20)
+
+
+def test_json_gate_not_triggered(tmp_path, monkeypatch):
+    """--json with gate not triggered: gate.triggered=false, exit=0, gate.exit_code=0."""
+    monkeypatch.setattr("zekan.severity.metrics._default_model_factory", _fast_clf)
+
+    df_clean = make_clean_dataset(n_entities=_N_ENTITIES, snapshots_per_entity=_SNAPSHOTS, seed=1)
+    df_leaky, _ = inject_label_proxy(df_clean, flip_rate=0.05, seed=0)
+    csv = tmp_path / "data.csv"
+    cfg = tmp_path / "zekan.yml"
+    df_leaky.to_csv(csv, index=False)
+    cfg.write_text(_LEAKY_CONFIG)
+
+    result = runner.invoke(app, [
+        "audit", "--data", str(csv), "--config", str(cfg),
+        "--json", "--fail-if-inflation-greater-than", "0.90",
+    ])
+
+    assert result.exit_code == 0
+    parsed = json.loads(result.stdout)
+    assert parsed["gate"]["triggered"] is False
+    assert parsed["gate"]["exit_code"] == 0
+
+
+def test_json_gate_human_text_not_in_stdout(tmp_path, monkeypatch):
+    """Gate human line ('Inflation gate:') goes to stderr, not stdout in --json mode."""
+    monkeypatch.setattr("zekan.severity.metrics._default_model_factory", _fast_clf)
+
+    df_clean = make_clean_dataset(n_entities=_N_ENTITIES, snapshots_per_entity=_SNAPSHOTS, seed=1)
+    df_leaky, _ = inject_label_proxy(df_clean, flip_rate=0.05, seed=0)
+    csv = tmp_path / "data.csv"
+    cfg = tmp_path / "zekan.yml"
+    df_leaky.to_csv(csv, index=False)
+    cfg.write_text(_LEAKY_CONFIG)
+
+    result = runner.invoke(app, [
+        "audit", "--data", str(csv), "--config", str(cfg),
+        "--json", "--fail-if-inflation-greater-than", "0.20",
+    ])
+
+    stdout = result.stdout
+    parsed = json.loads(stdout)
+    assert "Inflation gate:" not in stdout
+    assert parsed["gate"]["triggered"] is True

@@ -21,6 +21,7 @@ def _run_audit_pipeline(
     data: str,
     config: str,
     dry_run: bool = False,
+    json_mode: bool = False,
 ) -> Optional[object]:  # VerdictReport | None; VerdictReport imported lazily
     """Load config+data, validate contract, run audit. Returns None on early stop.
 
@@ -47,7 +48,7 @@ def _run_audit_pipeline(
         typer.echo(f"ERROR: invalid config:\n{exc}", err=True)
         raise typer.Exit(1)
     except ValueError as e:
-        typer.echo(f"ERROR: invalid config: {e}")
+        typer.echo(f"ERROR: invalid config: {e}", err=json_mode)
         raise typer.Exit(1)
 
     # ── load data ─────────────────────────────────────────────────────────────
@@ -69,23 +70,27 @@ def _run_audit_pipeline(
     result = validate_contract(cfg.contract, df)
 
     _icon = {CheckStatus.PASS: "PASS", CheckStatus.FAIL: "FAIL", CheckStatus.WARN: "WARN"}
-    typer.echo(f"\nZekan audit: {cfg.contract.prediction_problem}")
-    typer.echo("=" * _WIDTH)
+    typer.echo(f"\nZekan audit: {cfg.contract.prediction_problem}", err=json_mode)
+    typer.echo("=" * _WIDTH, err=json_mode)
     for check in result.checks:
-        typer.echo(f"  [{_icon[check.status]}]  {check.name}: {check.message}")
-    typer.echo("=" * _WIDTH)
+        typer.echo(f"  [{_icon[check.status]}]  {check.name}: {check.message}", err=json_mode)
+    typer.echo("=" * _WIDTH, err=json_mode)
 
     if result.passed and result.can_compute_severity:
-        typer.echo("READY: contract valid, severity computable")
+        typer.echo("READY: contract valid, severity computable", err=json_mode)
     elif result.passed:
         typer.echo(
             "CONTRACT VALID - severity cannot be computed "
-            "(data too small or too few time periods; see warnings above)."
+            "(data too small or too few time periods; see warnings above).",
+            err=json_mode,
         )
         return None
     else:
         failed = [c.name for c in result.checks if c.status == CheckStatus.FAIL]
-        typer.echo(f"CONTRACT FAILED: {', '.join(failed)}, severity will not be computed.")
+        typer.echo(
+            f"CONTRACT FAILED: {', '.join(failed)}, severity will not be computed.",
+            err=json_mode,
+        )
         raise typer.Exit(1)
 
     if dry_run:
@@ -108,6 +113,11 @@ def audit(
         "--fail-if-inflation-greater-than",
         help="Exit non-zero if AUC inflation exceeds this threshold.",
     ),
+    json_output: bool = typer.Option(
+        False,
+        "--json",
+        help="Output structured JSON to stdout; send all human-readable text to stderr.",
+    ),
 ) -> None:
     """Audit a model for data-leakage and trust issues."""
     import sys
@@ -116,22 +126,27 @@ def audit(
     except Exception:
         pass
 
-    audit_report = _run_audit_pipeline(data, config, dry_run=dry_run)
+    audit_report = _run_audit_pipeline(data, config, dry_run=dry_run, json_mode=json_output)
     if audit_report is None:
         if fail_if_inflation_greater_than is not None and not dry_run:
             # None + not dry_run == cannot-compute → UNVERIFIABLE, fail-safe
             typer.echo(
                 "Inflation gate: UNVERIFIABLE — inflation threshold was requested "
                 "but leakage could not be computed (data too small / too few periods); "
-                "cannot certify build."
+                "cannot certify build.",
+                err=json_output,
             )
             raise typer.Exit(1)
         return  # dry-run, or no gate requested → unchanged soft stop
 
     from zekan.reports.text_view import render_verdict
 
-    typer.echo("")
-    typer.echo(render_verdict(audit_report, stream=sys.stdout).rstrip())
+    if not json_output:
+        typer.echo("")
+        typer.echo(render_verdict(audit_report, stream=sys.stdout).rstrip())
+
+    gate_block = None
+    should_exit_1 = False
 
     if fail_if_inflation_greater_than is not None:
         import math
@@ -139,20 +154,48 @@ def audit(
         if fl is None or math.isnan(fl):
             typer.echo(
                 "Inflation gate: UNVERIFIABLE — leakage not computed; cannot "
-                "certify build."
+                "certify build.",
+                err=json_output,
             )
-            raise typer.Exit(1)
+            gate_block = {
+                "exit_code": 1,
+                "threshold": fail_if_inflation_greater_than,
+                "triggered": None,
+            }
+            should_exit_1 = True
         elif fl > fail_if_inflation_greater_than:
             typer.echo(
                 f"Inflation gate: FAIL — inflation {fl:.4f} exceeds threshold "
-                f"{fail_if_inflation_greater_than}."
+                f"{fail_if_inflation_greater_than}.",
+                err=json_output,
             )
-            raise typer.Exit(1)
+            gate_block = {
+                "exit_code": 1,
+                "threshold": fail_if_inflation_greater_than,
+                "triggered": True,
+            }
+            should_exit_1 = True
         else:
             typer.echo(
                 f"Inflation gate: PASS — inflation {fl:.4f} within threshold "
-                f"{fail_if_inflation_greater_than}."
+                f"{fail_if_inflation_greater_than}.",
+                err=json_output,
             )
+            gate_block = {
+                "exit_code": 0,
+                "threshold": fail_if_inflation_greater_than,
+                "triggered": False,
+            }
+
+    if json_output:
+        import json as _json
+        from zekan.reports.json_export import verdict_to_dict
+        d = verdict_to_dict(audit_report)
+        d["gate"] = gate_block
+        typer.echo(_json.dumps(d, sort_keys=True, indent=2))
+
+    if should_exit_1:
+        raise typer.Exit(1)
 
 
 @app.command()
