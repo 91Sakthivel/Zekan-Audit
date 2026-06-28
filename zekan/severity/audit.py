@@ -15,6 +15,7 @@ The caller never needs to call run_severity_analysis or build_verdict directly.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
 import pandas as pd
@@ -28,6 +29,48 @@ from zekan.severity.verdict import (
     _DEFAULT_WARN_FLOOR,
     build_verdict,
 )
+
+
+@dataclass
+class _ProbeSpec:
+    """Registry entry for one structural probe."""
+    fn: Callable
+    needs_folds: bool = False
+
+
+def _run_structural_probes(
+    df: pd.DataFrame,
+    contract: PredictionContract,
+    folds: Optional[list] = None,
+) -> list:
+    """Run all registered structural probes; return non-pass IssueRecords only.
+
+    Return type is a plain list to avoid importing IssueRecord here (would create
+    a module-level import of detectors into the audit orchestrator).
+
+    Probes with needs_folds=True are silently skipped when folds is None.
+    Each probe may return either a list[IssueRecord] or a single IssueRecord;
+    both are handled uniformly.
+    """
+    from zekan.detectors.entity_aggregate_probe import probe_forbidden_entity_level_aggregate
+    from zekan.detectors.duplicate_probe import probe_raw_duplicates, probe_cross_fold_duplicates
+
+    _PROBES: list[_ProbeSpec] = [
+        _ProbeSpec(fn=probe_forbidden_entity_level_aggregate, needs_folds=False),
+        _ProbeSpec(fn=probe_raw_duplicates, needs_folds=False),
+        _ProbeSpec(fn=probe_cross_fold_duplicates, needs_folds=True),
+    ]
+
+    found: list = []
+    for spec in _PROBES:
+        if spec.needs_folds and not folds:
+            continue
+        result = spec.fn(df, contract, folds) if spec.needs_folds else spec.fn(df, contract)
+        records: list = result if isinstance(result, list) else [result]
+        for rec in records:
+            if rec.status != "pass":
+                found.append(rec)
+    return found
 
 
 def run_audit(
@@ -91,8 +134,7 @@ def run_audit(
         policy_profile=policy_profile,
     )
 
-    from zekan.detectors.entity_aggregate_probe import probe_forbidden_entity_level_aggregate
-    annotations = probe_forbidden_entity_level_aggregate(df, contract)
+    annotations = _run_structural_probes(df, contract, folds=severity_result.folds)
     if annotations:
         report = report.model_copy(update={"structural_annotations": annotations})
 

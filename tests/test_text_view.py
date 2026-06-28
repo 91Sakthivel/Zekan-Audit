@@ -473,3 +473,115 @@ def test_gather_more_data_absent_in_structural_render():
 def test_gather_more_data_absent_in_statistical_render():
     out = render_verdict(_unconfirmed_statistical_report(), stream=_Utf8Stream())
     assert "Gather more data" not in out
+
+
+# ── Structural annotations in TRUSTED / RISKY / FAILED states ────────────────
+
+def _annotated_pass_report():
+    sr = _severity_result(fixable_leakage=0.03, p_value=0.50, nsl=-0.5)
+    report = build_verdict(sr)
+    return report.model_copy(update={"structural_annotations": [_FakeAnnotation()]})
+
+
+def _annotated_warn_report():
+    attr = _fake_attribution("top_offender", leakage=0.12)
+    sr = _severity_result(
+        fixable_leakage=0.12, p_value=0.001, nsl=1.5,
+        null_iqr=0.01, null_99th=0.09,
+        per_fold=_interior_folds([0.12, 0.11, 0.13]),
+        feature_attribution=attr,
+    )
+    report = build_verdict(sr)
+    return report.model_copy(update={"structural_annotations": [_FakeAnnotation()]})
+
+
+def _annotated_fail_report():
+    attr = _fake_attribution("top_offender", leakage=0.20)
+    sr = _severity_result(
+        fixable_leakage=0.20, p_value=0.001, nsl=2.5,
+        null_iqr=0.01, null_99th=0.09,
+        per_fold=_interior_folds([0.20, 0.19, 0.21]),
+        feature_attribution=attr,
+    )
+    report = build_verdict(sr)
+    return report.model_copy(update={"structural_annotations": [_FakeAnnotation()]})
+
+
+def test_trusted_with_annotation_shows_structural_heading():
+    out = render_verdict(_annotated_pass_report(), stream=_Utf8Stream())
+    assert "STRUCTURAL FINDING" in out
+
+
+def test_trusted_with_annotation_shows_also_noticed():
+    out = render_verdict(_annotated_pass_report(), stream=_Utf8Stream())
+    assert "also noticed" in out.lower()
+
+
+def test_trusted_with_annotation_shows_what():
+    out = render_verdict(_annotated_pass_report(), stream=_Utf8Stream())
+    assert _FakeAnnotation.what in out
+
+
+def test_trusted_with_annotation_still_shows_trusted_marker():
+    out = render_verdict(_annotated_pass_report(), stream=_Utf8Stream())
+    assert "✓ TRUSTED" in out
+
+
+def test_trusted_without_annotation_no_structural_block():
+    sr = _severity_result(fixable_leakage=0.03, p_value=0.50, nsl=-0.5)
+    report = build_verdict(sr)
+    out = render_verdict(report, stream=_Utf8Stream())
+    assert "STRUCTURAL FINDING" not in out
+
+
+def test_risky_with_annotation_shows_structural_heading():
+    out = render_verdict(_annotated_warn_report(), stream=_Utf8Stream())
+    assert "STRUCTURAL FINDING" in out
+
+
+def test_risky_with_annotation_shows_what():
+    out = render_verdict(_annotated_warn_report(), stream=_Utf8Stream())
+    assert _FakeAnnotation.what in out
+
+
+def test_risky_without_annotation_no_structural_block():
+    attr = _fake_attribution("top_offender", leakage=0.12)
+    sr = _severity_result(
+        fixable_leakage=0.12, p_value=0.001, nsl=1.5,
+        null_iqr=0.01, null_99th=0.09,
+        per_fold=_interior_folds([0.12, 0.11, 0.13]),
+        feature_attribution=attr,
+    )
+    report = build_verdict(sr)
+    out = render_verdict(report, stream=_Utf8Stream())
+    assert "STRUCTURAL FINDING" not in out
+
+
+def test_failed_with_annotation_shows_structural_heading():
+    out = render_verdict(_annotated_fail_report(), stream=_Utf8Stream())
+    assert "STRUCTURAL FINDING" in out
+
+
+def test_failed_with_annotation_shows_what():
+    out = render_verdict(_annotated_fail_report(), stream=_Utf8Stream())
+    assert _FakeAnnotation.what in out
+
+
+def test_failed_without_annotation_no_structural_block():
+    attr = _fake_attribution("top_offender", leakage=0.20)
+    sr = _severity_result(
+        fixable_leakage=0.20, p_value=0.001, nsl=2.5,
+        null_iqr=0.01, null_99th=0.09,
+        per_fold=_interior_folds([0.20, 0.19, 0.21]),
+        feature_attribution=attr,
+    )
+    report = build_verdict(sr)
+    out = render_verdict(report, stream=_Utf8Stream())
+    assert "STRUCTURAL FINDING" not in out
+
+
+def test_inconclusive_annotation_behavior_unchanged():
+    """INCONCLUSIVE + annotation shows STRUCTURAL FINDING block (byte-identical)."""
+    out = render_verdict(_unconfirmed_structural_report(), stream=_Utf8Stream())
+    assert "STRUCTURAL FINDING" in out
+    assert _FakeAnnotation.what in out

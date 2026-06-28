@@ -483,3 +483,97 @@ def test_gather_more_data_absent_in_html_structural_render():
 def test_gather_more_data_absent_in_html_statistical_render():
     out = render_verdict_html(_unconfirmed_report())
     assert "Gather more data" not in out
+
+
+# ── Structural annotations in TRUSTED / RISKY / FAILED states ────────────────
+
+def _annotated_pass_report() -> VerdictReport:
+    return _pass_report().model_copy(update={"structural_annotations": [_FakeAnnotation()]})
+
+
+def _annotated_warn_report() -> VerdictReport:
+    return _warn_report().model_copy(update={"structural_annotations": [_FakeAnnotation()]})
+
+
+def _annotated_fail_report() -> VerdictReport:
+    return _fail_report().model_copy(update={"structural_annotations": [_FakeAnnotation()]})
+
+
+def test_html_trusted_with_annotation_shows_structural_heading():
+    out = render_verdict_html(_annotated_pass_report())
+    assert "STRUCTURAL FINDING" in out
+
+
+def test_html_trusted_with_annotation_shows_also_noticed():
+    out = render_verdict_html(_annotated_pass_report())
+    assert "also noticed" in out.lower()
+
+
+def test_html_trusted_with_annotation_shows_what():
+    out = render_verdict_html(_annotated_pass_report())
+    assert _FakeAnnotation.what in out
+
+
+def test_html_trusted_with_annotation_still_shows_trusted():
+    out = render_verdict_html(_annotated_pass_report())
+    assert "TRUSTED" in out
+
+
+def test_html_trusted_without_annotation_no_structural_block():
+    out = render_verdict_html(_pass_report())
+    assert "STRUCTURAL FINDING" not in out
+
+
+def test_html_risky_with_annotation_shows_structural_heading():
+    out = render_verdict_html(_annotated_warn_report())
+    assert "STRUCTURAL FINDING" in out
+
+
+def test_html_risky_with_annotation_shows_what():
+    out = render_verdict_html(_annotated_warn_report())
+    assert _FakeAnnotation.what in out
+
+
+def test_html_risky_without_annotation_no_structural_block():
+    out = render_verdict_html(_warn_report())
+    assert "STRUCTURAL FINDING" not in out
+
+
+def test_html_failed_with_annotation_shows_structural_heading():
+    out = render_verdict_html(_annotated_fail_report())
+    assert "STRUCTURAL FINDING" in out
+
+
+def test_html_failed_with_annotation_shows_what():
+    out = render_verdict_html(_annotated_fail_report())
+    assert _FakeAnnotation.what in out
+
+
+def test_html_failed_without_annotation_no_structural_block():
+    out = render_verdict_html(_fail_report())
+    assert "STRUCTURAL FINDING" not in out
+
+
+def test_html_inconclusive_annotation_unchanged():
+    """INCONCLUSIVE with annotation shows STRUCTURAL FINDING (byte-identical)."""
+    out = render_verdict_html(_unconfirmed_structural_report())
+    assert "STRUCTURAL FINDING" in out
+    assert _FakeAnnotation.what in out
+
+
+def test_structural_finding_heading_parity_trusted():
+    """Same heading text in text and HTML for TRUSTED + annotation."""
+    report = _annotated_pass_report()
+    text_out = render_verdict(report, stream=_Utf8Stream())
+    html_out = render_verdict_html(report)
+    assert "STRUCTURAL FINDING" in text_out
+    assert "STRUCTURAL FINDING" in html_out
+
+
+def test_structural_also_noticed_parity_trusted():
+    """Same 'also noticed' framing in text and HTML for TRUSTED + annotation."""
+    report = _annotated_pass_report()
+    text_out = render_verdict(report, stream=_Utf8Stream())
+    html_out = render_verdict_html(report)
+    assert "also noticed" in text_out.lower()
+    assert "also noticed" in html_out.lower()

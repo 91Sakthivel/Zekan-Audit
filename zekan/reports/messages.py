@@ -92,3 +92,11 @@ FOOTER_INCONCLUSIVE = (
     "undeclared features, notebooks, user split code, or external "
     "train/test artifacts."
 )
+
+# ── Structural finding constants ──────────────────────────────────────────────
+# Shared by all four verdict states and both render surfaces (drift-lock).
+
+STRUCTURAL_FINDING_HEADING = "STRUCTURAL FINDING"
+
+# Lead-in for TRUSTED verdicts: frames the block as additional, not contradictory.
+STRUCTURAL_FINDING_TRUSTED_LEAD = "Zekan also noticed:"

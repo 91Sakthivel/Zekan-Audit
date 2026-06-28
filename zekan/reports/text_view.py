@@ -24,15 +24,17 @@ def render_verdict(report: VerdictReport, stream=None) -> str:
     verdict = report.policy_decision.verdict
     fl = report.measured_damage.fixable_leakage
     attribution = report.measured_damage.feature_attribution
+    annotations = report.structural_annotations
 
     if verdict in ("PASS", "NOTE"):
-        text = _render_trusted(_marker("trusted", stream))
+        text = _render_trusted(_marker("trusted", stream), annotations=annotations)
     elif verdict == "WARN":
         text = _render_actionable(
             marker=_marker("risky", stream),
             translation=_MSG.TRANSLATION_RISKY,
             fl=fl,
             attribution=attribution,
+            annotations=annotations,
         )
     elif verdict == "FAIL":
         text = _render_actionable(
@@ -40,16 +42,17 @@ def render_verdict(report: VerdictReport, stream=None) -> str:
             translation=_MSG.TRANSLATION_FAILED,
             fl=fl,
             attribution=attribution,
+            annotations=annotations,
         )
     elif verdict == "UNCONFIRMED_HIGH_DAMAGE":
         text = _render_inconclusive(
             _marker("inconclusive", stream),
             fl=fl,
             attribution=attribution,
-            annotations=report.structural_annotations,
+            annotations=annotations,
         )
     else:
-        text = _render_trusted(_marker("trusted", stream))
+        text = _render_trusted(_marker("trusted", stream), annotations=annotations)
     return _sanitize(text, stream)
 
 
@@ -58,14 +61,16 @@ def render_verdict(report: VerdictReport, stream=None) -> str:
 _DIVIDER = "─" * 60
 
 
-def _render_trusted(banner: str) -> str:
-    return "\n".join([
-        banner,
-        _MSG.TRANSLATION_TRUSTED,
-        "",
-        _DIVIDER,
-        _MSG.FOOTER_TRUSTED,
-    ])
+def _render_trusted(banner: str, annotations=None) -> str:
+    lines = [banner, _MSG.TRANSLATION_TRUSTED, ""]
+    if annotations:
+        lines.append(_MSG.STRUCTURAL_FINDING_HEADING)
+        lines.append(f"  {_MSG.STRUCTURAL_FINDING_TRUSTED_LEAD}")
+        for ann in annotations:
+            lines.append(f"  {ann.what}")
+        lines.append("")
+    lines.extend([_DIVIDER, _MSG.FOOTER_TRUSTED])
+    return "\n".join(lines)
 
 
 def _render_actionable(
@@ -73,6 +78,7 @@ def _render_actionable(
     translation: str,
     fl: float,
     attribution: Optional[AblationSummary],
+    annotations=None,
 ) -> str:
     lines: list[str] = [marker, translation, ""]
 
@@ -102,6 +108,12 @@ def _render_actionable(
     else:
         lines.append("")
         lines.append(_MSG.ACTION_RISKY_FAILED_NO_ATTR)
+
+    if annotations:
+        lines.append("")
+        lines.append(_MSG.STRUCTURAL_FINDING_HEADING)
+        for ann in annotations:
+            lines.append(f"  {ann.what}")
 
     lines.append("")
     lines.append(_DIVIDER)
@@ -146,7 +158,7 @@ def _render_inconclusive(
 
     if annotations:
         lines.append("")
-        lines.append("STRUCTURAL FINDING")
+        lines.append(_MSG.STRUCTURAL_FINDING_HEADING)
         for ann in annotations:
             lines.append(f"  {ann.what}")
 

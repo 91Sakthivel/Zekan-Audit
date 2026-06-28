@@ -12,6 +12,7 @@ The FAIL path uses RF(n_estimators=5) to minimise permutation wall time.
 from __future__ import annotations
 
 import numpy as np
+import pandas as pd
 import pytest
 from sklearn.ensemble import RandomForestClassifier
 
@@ -19,6 +20,7 @@ from zekan.benchmark.fixtures import make_clean_dataset
 from zekan.benchmark.injectors import inject_label_proxy
 from zekan.config.schema import ZekanConfig
 from zekan.contract.prediction_contract import PredictionContract
+from zekan.detectors.schema import IssueType
 from zekan.severity.audit import run_audit
 from zekan.severity.verdict import VerdictReport
 
@@ -143,3 +145,210 @@ class TestFailPath:
 
     def test_fixable_leakage_above_fail_floor(self, fail_report):
         assert fail_report.measured_damage.fixable_leakage >= 0.15
+
+
+# ── Structural probe fixtures ─────────────────────────────────────────────────
+
+@pytest.fixture(scope="module")
+def raw_dup_report():
+    """Dataset with 4 planted content-duplicate rows → ROW_DUPLICATION annotation."""
+    df = make_clean_dataset(n_entities=40, snapshots_per_entity=5, seed=7)
+    # Copy 4 rows; change only identity columns so feature+target content is identical.
+    extra = df.iloc[:4].copy()
+    extra = extra.assign(
+        entity_id=["dup_e0", "dup_e1", "dup_e2", "dup_e3"],
+        prediction_time="2099-01",
+    )
+    df = pd.concat([df, extra], ignore_index=True)
+    contract = PredictionContract(
+        prediction_problem="raw-dup-integration",
+        entity_id="entity_id",
+        prediction_time="prediction_time",
+        target="target",
+        available_features_until="prediction_time",
+    )
+    return run_audit(df, contract, ZekanConfig(contract=contract),
+                     model_factory=_fast_clf, n_permutations=0)
+
+
+@pytest.fixture(scope="module")
+def cross_fold_dup_report():
+    """Dataset with planted cross-fold content duplicates → CROSS_FOLD_DUPLICATE annotation.
+
+    3 rows from the earliest period are copied into the latest period with new
+    entity_ids.  The temporal probe sees them in the training set (early period)
+    and also in the test set (late period) for the last fold, causing a FAIL.
+    """
+    df = make_clean_dataset(n_entities=100, snapshots_per_entity=5, seed=0)
+    periods = sorted(df["prediction_time"].unique())
+    early_period, late_period = periods[0], periods[-1]
+    extra = df[df["prediction_time"] == early_period].head(3).copy()
+    extra = extra.assign(
+        entity_id=["xf_e0", "xf_e1", "xf_e2"],
+        prediction_time=late_period,
+    )
+    df = pd.concat([df, extra], ignore_index=True)
+    contract = PredictionContract(
+        prediction_problem="cross-fold-dup-integration",
+        entity_id="entity_id",
+        prediction_time="prediction_time",
+        target="target",
+        available_features_until="prediction_time",
+    )
+    return run_audit(df, contract, ZekanConfig(contract=contract),
+                     model_factory=_fast_clf, n_permutations=0)
+
+
+@pytest.fixture(scope="module")
+def entity_agg_report():
+    """Dataset with entity-level aggregate forbidden feature → FORBIDDEN_ENTITY_LEVEL_AGGREGATE."""
+    df = make_clean_dataset(n_entities=40, snapshots_per_entity=5, seed=5)
+    # Each entity gets the mean of its target values — constant within entity, varies across.
+    df["agg_forbidden"] = df.groupby("entity_id")["target"].transform("mean")
+    contract = PredictionContract(
+        prediction_problem="entity-agg-integration",
+        entity_id="entity_id",
+        prediction_time="prediction_time",
+        target="target",
+        available_features_until="prediction_time",
+        forbidden_after_prediction=["agg_forbidden"],
+    )
+    return run_audit(df, contract, ZekanConfig(contract=contract),
+                     model_factory=_fast_clf, n_permutations=0)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Structural probe loop — integration
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestStructuralProbes:
+    """probe_raw_duplicates + entity_aggregate wired into run_audit via _run_structural_probes."""
+
+    # ── Regression: clean audit stays clean ──────────────────────────────────
+
+    def test_clean_no_structural_annotations(self, pass_report):
+        """Clean data with a random forbidden feature → no structural annotations."""
+        assert pass_report.structural_annotations == []
+
+    # ── Entity-aggregate: existing behavior unchanged ─────────────────────────
+
+    def test_entity_agg_annotation_present(self, entity_agg_report):
+        assert len(entity_agg_report.structural_annotations) >= 1
+
+    def test_entity_agg_issue_type(self, entity_agg_report):
+        types = [a.issue_type for a in entity_agg_report.structural_annotations]
+        assert IssueType.FORBIDDEN_ENTITY_LEVEL_AGGREGATE in types
+
+    def test_entity_agg_annotation_serializes(self, entity_agg_report):
+        from zekan.reports.json_export import verdict_to_dict
+        d = verdict_to_dict(entity_agg_report)
+        assert len(d["structural_annotations"]) >= 1
+
+    # ── Raw-duplicate: new annotation ─────────────────────────────────────────
+
+    def test_raw_dup_annotation_present(self, raw_dup_report):
+        dup_annotations = [
+            a for a in raw_dup_report.structural_annotations
+            if a.issue_type == IssueType.ROW_DUPLICATION
+        ]
+        assert len(dup_annotations) == 1
+
+    def test_raw_dup_status_warn(self, raw_dup_report):
+        ann = next(
+            a for a in raw_dup_report.structural_annotations
+            if a.issue_type == IssueType.ROW_DUPLICATION
+        )
+        assert ann.status == "warn"
+
+    def test_raw_dup_excess_copies_count(self, raw_dup_report):
+        """4 planted rows → 4 excess copies reported."""
+        ann = next(
+            a for a in raw_dup_report.structural_annotations
+            if a.issue_type == IssueType.ROW_DUPLICATION
+        )
+        assert ann.evidence.structural_detail.duplicate_rows == 4
+
+    def test_raw_dup_annotation_serializes(self, raw_dup_report):
+        """IssueRecord with RowDuplicationDetail survives verdict_to_dict without error."""
+        from zekan.reports.json_export import verdict_to_dict
+        d = verdict_to_dict(raw_dup_report)
+        dup_annotations = [
+            a for a in d["structural_annotations"]
+            if a.get("issue_type") == IssueType.ROW_DUPLICATION.value
+        ]
+        assert len(dup_annotations) == 1
+
+    def test_raw_dup_annotation_in_json(self, raw_dup_report):
+        """ROW_DUPLICATION annotation present in the JSON output."""
+        import json
+        from zekan.reports.json_export import verdict_to_json
+        parsed = json.loads(verdict_to_json(raw_dup_report))
+        types_in_json = [a.get("issue_type") for a in parsed["structural_annotations"]]
+        assert IssueType.ROW_DUPLICATION.value in types_in_json
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Cross-fold duplicate probe wired into run_audit
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestCrossFoldProbe:
+
+    def test_cross_fold_annotation_present(self, cross_fold_dup_report):
+        types = [a.issue_type for a in cross_fold_dup_report.structural_annotations]
+        assert IssueType.CROSS_FOLD_DUPLICATE in types
+
+    def test_cross_fold_annotation_status_fail(self, cross_fold_dup_report):
+        ann = next(
+            a for a in cross_fold_dup_report.structural_annotations
+            if a.issue_type == IssueType.CROSS_FOLD_DUPLICATE
+        )
+        assert ann.status == "fail"
+
+    def test_cross_fold_excess_copies_count(self, cross_fold_dup_report):
+        """3 planted cross-fold rows → duplicate_rows == 3 in the cross-fold record."""
+        ann = next(
+            a for a in cross_fold_dup_report.structural_annotations
+            if a.issue_type == IssueType.CROSS_FOLD_DUPLICATE
+        )
+        assert ann.evidence.structural_detail.duplicate_rows == 3
+
+    def test_cross_fold_annotation_in_json(self, cross_fold_dup_report):
+        import json
+        from zekan.reports.json_export import verdict_to_json
+        parsed = json.loads(verdict_to_json(cross_fold_dup_report))
+        types = [a.get("issue_type") for a in parsed["structural_annotations"]]
+        assert IssueType.CROSS_FOLD_DUPLICATE.value in types
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Annotation rendering gap closed: TRUSTED + annotation → text + html show it
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestAnnotationRendering:
+
+    def test_trusted_raw_dup_text_shows_structural_finding(self, raw_dup_report):
+        from zekan.reports.text_view import render_verdict
+        out = render_verdict(raw_dup_report)
+        assert "STRUCTURAL FINDING" in out
+
+    def test_trusted_raw_dup_text_shows_also_noticed(self, raw_dup_report):
+        from zekan.reports.text_view import render_verdict
+        out = render_verdict(raw_dup_report)
+        assert "also noticed" in out.lower()
+
+    def test_trusted_raw_dup_html_shows_structural_finding(self, raw_dup_report):
+        from zekan.reports.html_view import render_verdict_html
+        out = render_verdict_html(raw_dup_report)
+        assert "STRUCTURAL FINDING" in out
+
+    def test_trusted_raw_dup_html_shows_also_noticed(self, raw_dup_report):
+        from zekan.reports.html_view import render_verdict_html
+        out = render_verdict_html(raw_dup_report)
+        assert "also noticed" in out.lower()
+
+    def test_folds_not_in_json_output(self, pass_report):
+        """SeverityResult.folds must not appear in verdict_to_dict output."""
+        import json
+        from zekan.reports.json_export import verdict_to_json
+        serialized = verdict_to_json(pass_report)
+        assert '"folds"' not in serialized

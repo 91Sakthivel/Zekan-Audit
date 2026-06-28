@@ -341,6 +341,12 @@ def test_to_json_method_indent(trusted_report):
 
 # ── structural_annotations serialized correctly ───────────────────────────────
 
+def test_folds_not_in_json_output(trusted_report):
+    """SeverityResult.folds is an internal artifact and must not appear in the JSON."""
+    text = verdict_to_json(trusted_report)
+    assert '"folds"' not in text
+
+
 def test_structural_annotations_serialized(trusted_report):
     class _FakeAnnotation:
         def model_dump(self, *, mode="python"):

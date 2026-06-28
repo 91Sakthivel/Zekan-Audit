@@ -76,6 +76,7 @@ class SeverityResult:
     nsl: Optional[float] = None                   # null-standardized leakage = (obs - q99)/IQR
     n_permutations_run: int = 0                   # 0 when null was not run
     feature_attribution: Optional[Any] = None     # AblationSummary when ablation ran; None otherwise
+    folds: list = field(default_factory=list)     # temporal FoldIndices used for B/C eval; internal only
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -365,6 +366,7 @@ def run_severity_analysis(
         nsl=nsl,
         n_permutations_run=n_permutations_run,
         feature_attribution=feature_attribution,
+        folds=temp_folds,
     )
 
 

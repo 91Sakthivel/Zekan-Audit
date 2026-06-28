@@ -78,9 +78,10 @@ def render_verdict_html(report: VerdictReport) -> str:
     verdict = report.policy_decision.verdict
     fl = report.measured_damage.fixable_leakage
     attribution = report.measured_damage.feature_attribution
+    annotations = report.structural_annotations
 
     if verdict in ("PASS", "NOTE"):
-        return _html_trusted()
+        return _html_trusted(annotations=annotations)
     if verdict == "WARN":
         return _html_actionable(
             banner_style=_AMBER,
@@ -89,6 +90,7 @@ def render_verdict_html(report: VerdictReport) -> str:
             translation=_MSG.TRANSLATION_RISKY,
             fl=fl,
             attribution=attribution,
+            annotations=annotations,
         )
     if verdict == "FAIL":
         return _html_actionable(
@@ -98,24 +100,29 @@ def render_verdict_html(report: VerdictReport) -> str:
             translation=_MSG.TRANSLATION_FAILED,
             fl=fl,
             attribution=attribution,
+            annotations=annotations,
         )
     if verdict == "UNCONFIRMED_HIGH_DAMAGE":
         return _html_inconclusive(
             fl=fl,
             attribution=attribution,
-            annotations=report.structural_annotations,
+            annotations=annotations,
         )
-    return _html_trusted()
+    return _html_trusted(annotations=annotations)
 
 
 # ── Render states ─────────────────────────────────────────────────────────────
 
-def _html_trusted() -> str:
+def _html_trusted(annotations=None) -> str:
     banner = _banner(_GREEN, "✓", "TRUSTED")
-    body = _wrap_body(
-        _p(_MSG.TRANSLATION_TRUSTED, _S_LEAD)
-        + _footer_block(_MSG.FOOTER_TRUSTED)
-    )
+    parts: list[str] = [_p(_MSG.TRANSLATION_TRUSTED, _S_LEAD)]
+    if annotations:
+        parts.append(_p(_MSG.STRUCTURAL_FINDING_HEADING, _S_SECTION))
+        parts.append(_p(_MSG.STRUCTURAL_FINDING_TRUSTED_LEAD, _S_MUTED))
+        for ann in annotations:
+            parts.append(_p(html.escape(ann.what), _S_LEAD))
+    parts.append(_footer_block(_MSG.FOOTER_TRUSTED))
+    body = _wrap_body("".join(parts))
     return _wrap_outer(banner + body)
 
 
@@ -126,6 +133,7 @@ def _html_actionable(
     translation: str,
     fl: float,
     attribution: Optional[AblationSummary],
+    annotations=None,
 ) -> str:
     banner = _banner(banner_style, icon, word)
 
@@ -154,6 +162,11 @@ def _html_actionable(
         ))
     else:
         parts.append(_p(_MSG.ACTION_RISKY_FAILED_NO_ATTR, _S_ACTION))
+
+    if annotations:
+        parts.append(_p(_MSG.STRUCTURAL_FINDING_HEADING, _S_SECTION))
+        for ann in annotations:
+            parts.append(_p(html.escape(ann.what), _S_LEAD))
 
     parts.append(_footer_block(_MSG.FOOTER_RISKY_FAILED))
 
@@ -191,7 +204,7 @@ def _html_inconclusive(
         ))
 
     if annotations:
-        parts.append(_p("STRUCTURAL FINDING", _S_SECTION))
+        parts.append(_p(_MSG.STRUCTURAL_FINDING_HEADING, _S_SECTION))
         for ann in annotations:
             parts.append(_p(html.escape(ann.what), _S_LEAD))
 
