@@ -22,6 +22,7 @@ def _run_audit_pipeline(
     config: str,
     dry_run: bool = False,
     json_mode: bool = False,
+    model_factory=None,
 ) -> Optional[object]:  # VerdictReport | None; VerdictReport imported lazily
     """Load config+data, validate contract, run audit. Returns None on early stop.
 
@@ -98,7 +99,7 @@ def _run_audit_pipeline(
 
     from zekan.severity.audit import run_audit
 
-    return run_audit(df, cfg.contract, cfg)
+    return run_audit(df, cfg.contract, cfg, model_factory=model_factory)
 
 
 # ── Commands ──────────────────────────────────────────────────────────────────
@@ -118,6 +119,11 @@ def audit(
         "--json",
         help="Output structured JSON to stdout; send all human-readable text to stderr.",
     ),
+    estimator: Optional[str] = typer.Option(
+        None,
+        "--estimator",
+        help="Classifier for leakage detection. Choices: extra_trees, gbm, logistic, rf. Default: rf (200-tree random forest).",
+    ),
 ) -> None:
     """Audit a model for data-leakage and trust issues."""
     import sys
@@ -126,7 +132,12 @@ def audit(
     except Exception:
         pass
 
-    audit_report = _run_audit_pipeline(data, config, dry_run=dry_run, json_mode=json_output)
+    model_factory = None
+    if estimator is not None:
+        from zekan.severity.estimators import _build_factory
+        model_factory = _build_factory(estimator)
+
+    audit_report = _run_audit_pipeline(data, config, dry_run=dry_run, json_mode=json_output, model_factory=model_factory)
     if audit_report is None:
         if fail_if_inflation_greater_than is not None and not dry_run:
             # None + not dry_run == cannot-compute → UNVERIFIABLE, fail-safe
@@ -203,11 +214,21 @@ def report(
     data: str = typer.Option(..., "--data", help="Path to dataset (CSV or Parquet)."),
     config: str = typer.Option(..., "--config", help="Path to zekan config YAML."),
     output: str = typer.Option(..., "--output", help="Path to write the HTML report to."),
+    estimator: Optional[str] = typer.Option(
+        None,
+        "--estimator",
+        help="Classifier for leakage detection. Choices: extra_trees, gbm, logistic, rf. Default: rf (200-tree random forest).",
+    ),
 ) -> None:
     """Run the audit and write an HTML report to a file."""
     from pathlib import Path
 
-    audit_report = _run_audit_pipeline(data, config)
+    model_factory = None
+    if estimator is not None:
+        from zekan.severity.estimators import _build_factory
+        model_factory = _build_factory(estimator)
+
+    audit_report = _run_audit_pipeline(data, config, model_factory=model_factory)
     if audit_report is None:
         return
 

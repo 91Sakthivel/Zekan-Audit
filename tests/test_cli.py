@@ -508,3 +508,60 @@ def test_json_gate_human_text_not_in_stdout(tmp_path, monkeypatch):
     parsed = json.loads(stdout)
     assert "Inflation gate:" not in stdout
     assert parsed["gate"]["triggered"] is True
+
+
+# ── --estimator flag tests ────────────────────────────────────────────────────
+
+def test_audit_unknown_estimator_exits_with_error(tmp_path, monkeypatch):
+    """--estimator with an unsupported name → non-zero exit, error lists valid choices."""
+    monkeypatch.setattr("zekan.severity.metrics._default_model_factory", _fast_clf)
+
+    df = make_clean_dataset(n_entities=_N_ENTITIES, snapshots_per_entity=_SNAPSHOTS, seed=1)
+    csv = tmp_path / "data.csv"
+    cfg = tmp_path / "zekan.yml"
+    df.to_csv(csv, index=False)
+    cfg.write_text(_CLEAN_CONFIG)
+
+    result = runner.invoke(app, [
+        "audit", "--data", str(csv), "--config", str(cfg), "--estimator", "xgboost",
+    ])
+
+    assert result.exit_code != 0
+    combined = (result.output or "") + str(result.exception or "")
+    assert "xgboost" in combined or "Valid choices" in combined
+
+
+def test_audit_estimator_logistic_completes(tmp_path):
+    """--estimator logistic runs the full audit and exits 0 on clean data."""
+    df = make_clean_dataset(n_entities=_N_ENTITIES, snapshots_per_entity=_SNAPSHOTS, seed=1)
+    csv = tmp_path / "data.csv"
+    cfg = tmp_path / "zekan.yml"
+    df.to_csv(csv, index=False)
+    cfg.write_text(_CLEAN_CONFIG)
+
+    result = runner.invoke(app, [
+        "audit", "--data", str(csv), "--config", str(cfg), "--estimator", "logistic",
+    ])
+
+    assert result.exit_code == 0, result.output
+    assert "✓ TRUSTED" in result.output
+
+
+def test_audit_no_estimator_json_is_deterministic(tmp_path, monkeypatch):
+    """Omitting --estimator produces byte-identical JSON across two consecutive runs."""
+    monkeypatch.setattr("zekan.severity.metrics._default_model_factory", _fast_clf)
+    monkeypatch.setattr("zekan.severity.ablation._default_factory", _fast_clf)
+
+    df = make_clean_dataset(n_entities=_N_ENTITIES, snapshots_per_entity=_SNAPSHOTS, seed=1)
+    csv = tmp_path / "data.csv"
+    cfg = tmp_path / "zekan.yml"
+    df.to_csv(csv, index=False)
+    cfg.write_text(_CLEAN_CONFIG)
+
+    args = ["audit", "--data", str(csv), "--config", str(cfg), "--json"]
+    r1 = runner.invoke(app, args)
+    r2 = runner.invoke(app, args)
+
+    assert r1.exit_code == 0, r1.output
+    assert r2.exit_code == 0, r2.output
+    assert r1.stdout == r2.stdout
