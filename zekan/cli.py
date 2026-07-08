@@ -95,6 +95,27 @@ def _run_audit_pipeline(
         )
         raise typer.Exit(1)
 
+    # ── pre-flight data sanity check ─────────────────────────────────────────
+    # Runs on both real and dry-run paths (dry-run users benefit from notes too).
+    from zekan.reports.preflight import format_preflight_lines, scan_dataframe
+
+    _declared: dict[str, str] = {}
+    for _col, _role in [
+        (cfg.contract.entity_id, "entity_id"),
+        (cfg.contract.prediction_time, "prediction_time"),
+        (cfg.contract.target, "target"),
+        (cfg.contract.available_features_until, "available_features_until"),
+    ]:
+        _declared.setdefault(_col, _role)
+    for _col in cfg.contract.forbidden_after_prediction:
+        _declared.setdefault(_col, "forbidden feature")
+
+    _pf_notes = scan_dataframe(df, _declared)
+    if _pf_notes:
+        typer.echo("Pre-flight data check:", err=json_mode)
+        for _line in format_preflight_lines(_pf_notes):
+            typer.echo(f"  {_line}", err=json_mode)
+
     if dry_run:
         return None, None
 
