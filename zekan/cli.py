@@ -24,6 +24,7 @@ def _run_audit_pipeline(
     json_mode: bool = False,
     model_factory=None,
     estimator_identity: str = "default",
+    n_jobs: int = 1,
 ) -> tuple:  # (VerdictReport | None, provenance_dict | None)
     """Load config+data, validate contract, run audit. Returns (None, None) on early stop.
 
@@ -128,7 +129,7 @@ def _run_audit_pipeline(
         read_estimator_random_state,
     )
 
-    _report = run_audit(df, cfg.contract, cfg, model_factory=model_factory)
+    _report = run_audit(df, cfg.contract, cfg, model_factory=model_factory, n_jobs=n_jobs)
     _provenance = build_provenance(
         data_hash=hash_dataframe(df),
         contract_hash=hash_contract(cfg.contract),
@@ -167,6 +168,11 @@ def audit(
         "--manifest",
         help="If set, write a provenance manifest JSON (with timestamp) to this path.",
     ),
+    jobs: int = typer.Option(
+        1,
+        "--jobs",
+        help="Parallel workers for per-feature ablation (default 1 = serial). Uses loky process pool.",
+    ),
 ) -> None:
     """Audit a model for data-leakage and trust issues."""
     import sys
@@ -187,6 +193,7 @@ def audit(
         json_mode=json_output,
         model_factory=model_factory,
         estimator_identity=estimator_identity,
+        n_jobs=jobs,
     )
     if audit_report is None:
         if fail_if_inflation_greater_than is not None and not dry_run:

@@ -98,6 +98,28 @@ def _name_score(name: str) -> float:
     return 1.0 if _SUSPICIOUS_PATTERNS.search(name) else 0.0
 
 
+def _ablate_one(
+    feature: str,
+    all_features: list[str],
+    df: pd.DataFrame,
+    target_col: str,
+    folds: list,
+    model_factory: Callable[[], Any],
+    baseline_auc: float,
+) -> tuple:
+    """Compute ablation for one feature; safe to call in a joblib worker.
+
+    Returns (feature, auc_without, leakage_estimate, ablated, not_ablated_reason).
+    Module-level so loky can pickle it by (module, qualname).
+    """
+    features_minus_one = [f for f in all_features if f != feature]
+    result = evaluate_folds(df, features_minus_one, target_col, folds, model_factory)
+    if result.n_valid_folds == 0:
+        return (feature, float("nan"), float("nan"), False,
+                "no valid folds after dropping feature")
+    return (feature, result.mean_auc, baseline_auc - result.mean_auc, True, None)
+
+
 # ── Public API ────────────────────────────────────────────────────────────────
 
 def run_ablation(
@@ -107,6 +129,7 @@ def run_ablation(
     folds: list[FoldIndices],
     top_k: int = 10,
     model_factory: Optional[Callable[[], Any]] = None,
+    n_jobs: int = 1,
 ) -> AblationSummary:
     """Run per-feature ablation on forbidden candidates.
 
@@ -149,23 +172,45 @@ def run_ablation(
 
     entries.sort(key=lambda e: e.rank_score, reverse=True)
 
-    # One-at-a-time ablation for top_k features
-    for i, entry in enumerate(entries):
-        if i >= top_k:
-            entry.not_ablated_reason = f"budget exceeded (top_k={top_k})"
-            continue
+    # Mark budget-exceeded entries (beyond top_k) — no computation needed.
+    to_ablate = entries[:top_k]
+    for entry in entries[top_k:]:
+        entry.not_ablated_reason = f"budget exceeded (top_k={top_k})"
 
-        features_minus_one = [f for f in all_features if f != entry.feature]
-        result = evaluate_folds(
-            df, features_minus_one, contract.target, folds, model_factory
+    # One-at-a-time ablation: serial (n_jobs=1) or parallel (n_jobs != 1).
+    if n_jobs == 1:
+        for entry in to_ablate:
+            features_minus_one = [f for f in all_features if f != entry.feature]
+            result = evaluate_folds(
+                df, features_minus_one, contract.target, folds, model_factory
+            )
+            if result.n_valid_folds == 0:
+                entry.not_ablated_reason = "no valid folds after dropping feature"
+                continue
+            entry.auc_without = result.mean_auc
+            entry.leakage_estimate = baseline_auc - result.mean_auc
+            entry.ablated = True
+    else:
+        from joblib import Parallel, delayed  # noqa: PLC0415
+        raw = Parallel(n_jobs=n_jobs, backend="loky")(
+            delayed(_ablate_one)(
+                entry.feature, all_features, df, contract.target, folds,
+                model_factory, baseline_auc,
+            )
+            for entry in to_ablate
         )
-        if result.n_valid_folds == 0:
-            entry.not_ablated_reason = "no valid folds after dropping feature"
-            continue
-
-        entry.auc_without = result.mean_auc
-        entry.leakage_estimate = baseline_auc - result.mean_auc
-        entry.ablated = True
+        # Write results back by feature name — independent of completion order.
+        by_feat: dict[str, tuple] = {
+            feat: (auc_w, leak, abl, reason)
+            for feat, auc_w, leak, abl, reason in raw
+        }
+        for entry in to_ablate:
+            auc_w, leak, abl, reason = by_feat[entry.feature]
+            entry.auc_without = auc_w
+            entry.leakage_estimate = leak
+            entry.ablated = abl
+            if reason is not None:
+                entry.not_ablated_reason = reason
 
     # Cumulative ablation: drop ALL ablated features simultaneously
     ablated = [e for e in entries if e.ablated]

@@ -143,6 +143,7 @@ def run_severity_analysis(
     n_permutations: int = 0,
     null_seed: int = 0,
     ablation_warn_floor: Optional[float] = None,
+    n_jobs: int = 1,
 ) -> SeverityResult:
     """Run the A/B/C performance decomposition and return a SeverityResult.
 
@@ -309,7 +310,7 @@ def run_severity_analysis(
         from zekan.severity.ablation import run_ablation
         feature_attribution = run_ablation(
             df, contract, baseline_auc=naive_auc, folds=temp_folds,
-            model_factory=model_factory,
+            model_factory=model_factory, n_jobs=n_jobs,
         )
 
     total_optimism = naive_auc - estimated_deployable_auc

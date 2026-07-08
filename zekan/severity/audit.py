@@ -83,6 +83,7 @@ def run_audit(
     warn_floor: float = _DEFAULT_WARN_FLOOR,
     fail_floor: float = _DEFAULT_FAIL_FLOOR,
     policy_profile: str = "default_auc",
+    n_jobs: int = 1,
 ) -> VerdictReport:
     """Chain run_severity_analysis → build_verdict, returning all three verdict blocks.
 
@@ -126,6 +127,7 @@ def run_audit(
         n_permutations=n_permutations,
         null_seed=null_seed,
         ablation_warn_floor=warn_floor,
+        n_jobs=n_jobs,
     )
     report = build_verdict(
         severity_result,
