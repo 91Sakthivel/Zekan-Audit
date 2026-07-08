@@ -23,12 +23,13 @@ def _run_audit_pipeline(
     dry_run: bool = False,
     json_mode: bool = False,
     model_factory=None,
-) -> Optional[object]:  # VerdictReport | None; VerdictReport imported lazily
-    """Load config+data, validate contract, run audit. Returns None on early stop.
+    estimator_identity: str = "default",
+) -> tuple:  # (VerdictReport | None, provenance_dict | None)
+    """Load config+data, validate contract, run audit. Returns (None, None) on early stop.
 
     Prints the contract check table and status messages in all cases.
     Raises typer.Exit(1) on contract failure or load errors.
-    Returns None when cannot-compute or dry_run stops early (caller should return).
+    Returns (None, None) when cannot-compute or dry_run stops early.
     """
     from pathlib import Path
 
@@ -85,7 +86,7 @@ def _run_audit_pipeline(
             "(data too small or too few time periods; see warnings above).",
             err=json_mode,
         )
-        return None
+        return None, None
     else:
         failed = [c.name for c in result.checks if c.status == CheckStatus.FAIL]
         typer.echo(
@@ -95,11 +96,27 @@ def _run_audit_pipeline(
         raise typer.Exit(1)
 
     if dry_run:
-        return None
+        return None, None
 
     from zekan.severity.audit import run_audit
+    from zekan.reports.provenance import (
+        build_provenance,
+        capture_versions,
+        hash_contract,
+        hash_dataframe,
+        read_estimator_random_state,
+    )
 
-    return run_audit(df, cfg.contract, cfg, model_factory=model_factory)
+    _report = run_audit(df, cfg.contract, cfg, model_factory=model_factory)
+    _provenance = build_provenance(
+        data_hash=hash_dataframe(df),
+        contract_hash=hash_contract(cfg.contract),
+        versions=capture_versions(),
+        null_seed=0,
+        estimator_identity=estimator_identity,
+        estimator_random_state=read_estimator_random_state(model_factory),
+    )
+    return _report, _provenance
 
 
 # ── Commands ──────────────────────────────────────────────────────────────────
@@ -124,6 +141,11 @@ def audit(
         "--estimator",
         help="Classifier for leakage detection. Choices: extra_trees, gbm, logistic, rf. Default: rf (200-tree random forest).",
     ),
+    manifest_path: Optional[str] = typer.Option(
+        None,
+        "--manifest",
+        help="If set, write a provenance manifest JSON (with timestamp) to this path.",
+    ),
 ) -> None:
     """Audit a model for data-leakage and trust issues."""
     import sys
@@ -137,7 +159,14 @@ def audit(
         from zekan.severity.estimators import _build_factory
         model_factory = _build_factory(estimator)
 
-    audit_report = _run_audit_pipeline(data, config, dry_run=dry_run, json_mode=json_output, model_factory=model_factory)
+    estimator_identity = estimator if estimator is not None else "default"
+    audit_report, provenance = _run_audit_pipeline(
+        data, config,
+        dry_run=dry_run,
+        json_mode=json_output,
+        model_factory=model_factory,
+        estimator_identity=estimator_identity,
+    )
     if audit_report is None:
         if fail_if_inflation_greater_than is not None and not dry_run:
             # None + not dry_run == cannot-compute → UNVERIFIABLE, fail-safe
@@ -203,7 +232,12 @@ def audit(
         from zekan.reports.json_export import verdict_to_dict
         d = verdict_to_dict(audit_report)
         d["gate"] = gate_block
+        d["provenance"] = provenance
         typer.echo(_json.dumps(d, sort_keys=True, indent=2))
+
+    if manifest_path is not None and provenance is not None:
+        from zekan.reports.provenance import build_manifest, write_manifest
+        write_manifest(build_manifest(provenance), manifest_path)
 
     if should_exit_1:
         raise typer.Exit(1)
@@ -228,7 +262,7 @@ def report(
         from zekan.severity.estimators import _build_factory
         model_factory = _build_factory(estimator)
 
-    audit_report = _run_audit_pipeline(data, config, model_factory=model_factory)
+    audit_report, _ = _run_audit_pipeline(data, config, model_factory=model_factory)
     if audit_report is None:
         return
 
