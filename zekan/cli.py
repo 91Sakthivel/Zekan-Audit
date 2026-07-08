@@ -330,6 +330,116 @@ def _render_diff(d: dict, *, err: bool = False) -> None:
 
 
 @app.command()
+def init(
+    data: str = typer.Option(..., "--data", help="Path to dataset (CSV or Parquet)."),
+    out: str = typer.Option("zekan.yml", "--out", help="Output path for the generated config YAML."),
+) -> None:
+    """Interactive wizard: inspect your dataset and write a zekan.yml contract."""
+    from pathlib import Path
+
+    import pandas as pd
+    from pydantic import ValidationError
+
+    from zekan.init_wizard import build_contract_mapping, validate_mapping, write_config
+
+    # ── load data (same block as _run_audit_pipeline) ─────────────────────────
+    data_path = Path(data)
+    try:
+        suffix = data_path.suffix.lower()
+        if suffix == ".csv":
+            df = pd.read_csv(data_path)
+        elif suffix in (".parquet", ".pq"):
+            df = pd.read_parquet(data_path)
+        else:
+            typer.echo(f"ERROR: unsupported format '{data_path.suffix}' (use .csv or .parquet)", err=True)
+            raise typer.Exit(1)
+    except FileNotFoundError:
+        typer.echo(f"ERROR: data file not found: {data_path}", err=True)
+        raise typer.Exit(1)
+
+    cols = list(df.columns)
+    if not cols:
+        typer.echo("ERROR: dataset has no columns.", err=True)
+        raise typer.Exit(1)
+
+    # ── interactive helpers ────────────────────────────────────────────────────
+    def _show_menu() -> None:
+        typer.echo("  Columns:")
+        for i, c in enumerate(cols):
+            typer.echo(f"    [{i}] {c}")
+
+    def _pick_one(field_name: str) -> str:
+        while True:
+            _show_menu()
+            raw = typer.prompt(f"  Select {field_name} (0-{len(cols) - 1})")
+            try:
+                idx = int(raw.strip())
+                if 0 <= idx < len(cols):
+                    return cols[idx]
+            except ValueError:
+                pass
+            typer.echo(f"  ERROR: enter a number between 0 and {len(cols) - 1}.")
+
+    def _pick_many(field_name: str) -> list[str]:
+        while True:
+            _show_menu()
+            raw = typer.prompt(
+                f"  Select {field_name} (comma-separated numbers, empty for none)",
+                default="",
+            )
+            raw = raw.strip()
+            if not raw:
+                return []
+            try:
+                parts = [x.strip() for x in raw.split(",") if x.strip()]
+                indices = [int(x) for x in parts]
+                if all(0 <= idx < len(cols) for idx in indices):
+                    return [cols[idx] for idx in indices]
+            except ValueError:
+                pass
+            typer.echo(
+                f"  ERROR: enter comma-separated numbers between 0 and {len(cols) - 1},"
+                " or leave empty."
+            )
+
+    # ── prompts ───────────────────────────────────────────────────────────────
+    typer.echo(f"\nZekan init — {len(cols)} columns found in {data_path.name}")
+    prediction_problem = typer.prompt("  Describe your prediction problem (free text)")
+    entity_id = _pick_one("entity_id")
+    prediction_time = _pick_one("prediction_time")
+    target = _pick_one("target")
+    available_features_until = _pick_one("available_features_until")
+    forbidden_after_prediction = _pick_many("forbidden_after_prediction")
+
+    # ── build + validate ───────────────────────────────────────────────────────
+    mapping = build_contract_mapping(
+        prediction_problem=prediction_problem,
+        entity_id=entity_id,
+        prediction_time=prediction_time,
+        target=target,
+        available_features_until=available_features_until,
+        forbidden_after_prediction=forbidden_after_prediction,
+    )
+    try:
+        validate_mapping(mapping)
+    except ValidationError as exc:
+        typer.echo(f"ERROR: contract validation failed:\n{exc}", err=True)
+        raise typer.Exit(1)
+
+    # ── no-clobber ────────────────────────────────────────────────────────────
+    out_path = Path(out)
+    if out_path.exists():
+        overwrite = typer.confirm(f"  {out_path} already exists. Overwrite?", default=False)
+        if not overwrite:
+            typer.echo("Aborted. Existing file not changed.")
+            raise typer.Exit(0)
+
+    # ── write ─────────────────────────────────────────────────────────────────
+    write_config(mapping, out_path)
+    typer.echo(f"\nDone. Run:  zekan audit --data {data} --config {out}")
+
+
+@app.command()
 def benchmark() -> None:
     """Run the benchmark suite against known leakage fixtures."""
     typer.echo("not implemented yet")
