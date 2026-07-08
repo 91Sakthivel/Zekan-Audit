@@ -240,6 +240,96 @@ def report(
 
 
 @app.command()
+def diff(
+    old: str = typer.Option(..., "--old", help="Path to old audit JSON artifact."),
+    new: str = typer.Option(..., "--new", help="Path to new audit JSON artifact."),
+    json_output: bool = typer.Option(
+        False,
+        "--json",
+        help="Output structured JSON to stdout; send human-readable text to stderr.",
+    ),
+    fail_on_regression: bool = typer.Option(
+        False,
+        "--fail-on-regression",
+        help="Exit non-zero if leakage increased between old and new.",
+    ),
+) -> None:
+    """Compare two audit JSON artifacts and show the leakage delta."""
+    import json as _json
+    import sys
+    from pathlib import Path
+
+    from zekan.reports.diff import diff_reports
+
+    def _load(path: str) -> dict:
+        p = Path(path)
+        if not p.exists():
+            typer.echo(f"ERROR: file not found: {p}", err=True)
+            raise typer.Exit(1)
+        try:
+            return _json.loads(p.read_text(encoding="utf-8"))
+        except _json.JSONDecodeError as exc:
+            typer.echo(f"ERROR: invalid JSON in {p}: {exc}", err=True)
+            raise typer.Exit(1)
+
+    old_data = _load(old)
+    new_data = _load(new)
+
+    result = diff_reports(old_data, new_data)
+
+    if json_output:
+        typer.echo(_json.dumps(result, sort_keys=True, indent=2))
+    else:
+        _render_diff(result, err=False)
+
+    if "schema_mismatch" in result:
+        typer.echo(f"  Note: {result['schema_mismatch']}", err=json_output)
+
+    if fail_on_regression and result["direction"] == "REGRESSED":
+        raise typer.Exit(1)
+
+
+def _render_diff(d: dict, *, err: bool = False) -> None:
+    """Human-readable diff output: verdict-first, one-screen."""
+    direction = d["direction"]
+    fl_old = d["fl_old"]
+    fl_new = d["fl_new"]
+    fl_delta = d["fl_delta"]
+
+    if direction == "UNVERIFIABLE_CHANGE":
+        header = "UNVERIFIABLE_CHANGE — leakage comparison not possible (null on one or both sides)"
+    elif fl_delta is not None:
+        sign = "+" if fl_delta > 0 else ""
+        header = (
+            f"{direction} — leakage {fl_old:.4f} → {fl_new:.4f} "
+            f"({sign}{fl_delta:.4f})"
+        )
+    else:
+        header = direction
+
+    typer.echo(header, err=err)
+
+    headline_old = d.get("headline_old") or d.get("verdict_old") or "?"
+    headline_new = d.get("headline_new") or d.get("verdict_new") or "?"
+    verdict_tag = "" if d["verdict_changed"] else " (no change)"
+    typer.echo(f"  Verdict: {headline_old} → {headline_new}{verdict_tag}", err=err)
+
+    tf_old = d["top_feature_old"] or "(none)"
+    tf_new = d["top_feature_new"] or "(none)"
+    status = d["top_feature_status"]
+    if status == "none":
+        typer.echo("  Top cause: (none)", err=err)
+    elif status == "fixed":
+        typer.echo(f"  Fixed: {tf_old} (was top cause)", err=err)
+    elif status == "appeared":
+        typer.echo(f"  New top cause: {tf_new}", err=err)
+    elif status == "same":
+        typer.echo(f"  Top cause: {tf_old} (still present)", err=err)
+    else:
+        typer.echo(f"  Top cause: {tf_old} → {tf_new}", err=err)
+
+
+@app.command()
 def benchmark() -> None:
     """Run the benchmark suite against known leakage fixtures."""
     typer.echo("not implemented yet")
