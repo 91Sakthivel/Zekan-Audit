@@ -29,7 +29,7 @@ def render_verdict(report: VerdictReport, stream=None) -> str:
     fold_ci = report.fold_ci
 
     if verdict in ("PASS", "NOTE"):
-        text = _render_trusted(_marker("trusted", stream), annotations=annotations)
+        text = _render_trusted(_marker("trusted", stream), annotations=annotations, fold_ci=fold_ci)
     elif verdict == "WARN":
         text = _render_actionable(
             marker=_marker("risky", stream),
@@ -66,8 +66,13 @@ def render_verdict(report: VerdictReport, stream=None) -> str:
 _DIVIDER = "─" * 60
 
 
-def _render_trusted(banner: str, annotations=None) -> str:
+def _render_trusted(banner: str, annotations=None, fold_ci: Optional[FoldCI] = None) -> str:
     lines = [banner, _MSG.TRANSLATION_TRUSTED, ""]
+    if fold_ci is not None and fold_ci.stability_seeds_checked > 0 and not fold_ci.seed_instability_note:
+        lines.append(
+            f"  Stability: verdict consistent across {fold_ci.stability_seeds_checked} null seeds."
+        )
+        lines.append("")
     if annotations:
         lines.append(_MSG.STRUCTURAL_FINDING_HEADING)
         lines.append(f"  {_MSG.STRUCTURAL_FINDING_TRUSTED_LEAD}")
@@ -98,6 +103,10 @@ def _render_actionable(
             f"{fold_ci.folds_evaluated + fold_ci.folds_skipped} evaluated)"
             + (f" — {fold_ci.skip_reasons[0]}" if fold_ci.skip_reasons else "")
             + "."
+        )
+    if fold_ci is not None and fold_ci.stability_seeds_checked > 0 and not fold_ci.seed_instability_note:
+        lines.append(
+            f"    Stability: verdict consistent across {fold_ci.stability_seeds_checked} null seeds."
         )
 
     ablated = _sorted_ablated(attribution)
@@ -153,7 +162,13 @@ def _render_inconclusive(
 ) -> str:
     lines: list[str] = [banner, _MSG.TRANSLATION_INCONCLUSIVE, ""]
 
-    if fold_ci is not None and fold_ci.folds_skipped > 0:
+    if fold_ci is not None and fold_ci.seed_instability_note:
+        lines.append(f"  Stability: {fold_ci.seed_instability_note}.")
+        lines.append(
+            "  Downgraded to INCONCLUSIVE — the audit verdict depends on the random seed."
+        )
+        lines.append("")
+    elif fold_ci is not None and fold_ci.folds_skipped > 0:
         lines.append(
             f"  Fold coverage: {fold_ci.folds_skipped} fold(s) skipped "
             f"({fold_ci.folds_evaluated} of "

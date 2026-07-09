@@ -250,6 +250,12 @@ class FoldCI(BaseModel):
     skip_reasons: list[str] = Field(default_factory=list)
     """Distinct skip reason strings from skipped folds, de-duplicated in first-seen order."""
 
+    seed_instability_note: str = ""
+    """Empty unless seed-stability check fired.  Non-empty: 'verdict changed across N seeds: PASS x3, WARN x2'."""
+
+    stability_seeds_checked: int = 0
+    """0 when seed-stability check was not run; N when it was (stable or unstable)."""
+
 
 class VerdictReport(BaseModel):
     """Four-block verdict for one leakage analysis run."""
@@ -395,6 +401,30 @@ def _compute_fold_ci(
     )
 
 
+# ── Shared downgrade factory ──────────────────────────────────────────────────
+
+def _make_unconfirmed_report(
+    *,
+    engine_detection: EngineDetection,
+    measured_damage: MeasuredDamage,
+    policy_decision: PolicyDecision,
+    fold_ci: FoldCI,
+    structural_annotations: list | None = None,
+) -> VerdictReport:
+    """Canonical UNCONFIRMED_HIGH_DAMAGE report factory.
+
+    Both the fold-starved gate (spec 4) and the seed-stability downgrade (spec 3)
+    route through this function so they produce the same VerdictReport shape.
+    """
+    return VerdictReport(
+        engine_detection=engine_detection,
+        measured_damage=measured_damage,
+        policy_decision=policy_decision,
+        fold_ci=fold_ci,
+        structural_annotations=structural_annotations or [],
+    )
+
+
 # ── Verdict ladder ────────────────────────────────────────────────────────────
 
 def _policy_verdict(
@@ -537,7 +567,7 @@ def build_verdict(
         _fl_g = result.fixable_leakage
         _mean_b_g = result.naive_auc - result.nonfixable_optimism
         _total_folds_g = fold_ci.folds_evaluated + fold_ci.folds_skipped
-        return VerdictReport(
+        return _make_unconfirmed_report(
             engine_detection=EngineDetection(
                 detected=False,
                 p_value=result.p_value,
@@ -672,4 +702,63 @@ def build_verdict(
         measured_damage=damage,
         policy_decision=decision,
         fold_ci=fold_ci,
+    )
+
+
+# ── Seed-stability helper ─────────────────────────────────────────────────────
+
+def _apply_seed_stability(
+    primary_report: VerdictReport,
+    verdicts: list[str],
+) -> VerdictReport:
+    """Apply seed-stability outcome to primary_report.
+
+    verdicts: canonical policy_decision.verdict strings for seeds 0..N-1,
+              where verdicts[0] corresponds to primary_report.
+
+    Returns:
+      - Stable path: primary_report with fold_ci.stability_seeds_checked=N
+        and fold_ci.seed_instability_note="".
+      - Unstable path: UNCONFIRMED_HIGH_DAMAGE report (via _make_unconfirmed_report)
+        with fold_ci.seed_instability_note containing the distribution and
+        policy_decision.interpretation explaining seed-dependence.
+    """
+    _n = len(verdicts)
+    _updated_fold_ci = primary_report.fold_ci.model_copy(
+        update={"stability_seeds_checked": _n}
+    )
+
+    if len(set(verdicts)) <= 1:
+        return primary_report.model_copy(update={"fold_ci": _updated_fold_ci})
+
+    # Build ordered distribution string (first-appearance order — deterministic).
+    _seen_order: list[str] = []
+    _counts: dict[str, int] = {}
+    for _v in verdicts:
+        if _v not in _counts:
+            _seen_order.append(_v)
+        _counts[_v] = _counts.get(_v, 0) + 1
+    _dist = ", ".join(f"{_v} x{_counts[_v]}" for _v in _seen_order)
+    _note = f"verdict changed across {_n} seeds: {_dist}"
+
+    _unstable_fold_ci = _updated_fold_ci.model_copy(
+        update={"seed_instability_note": _note}
+    )
+
+    _new_pd = primary_report.policy_decision.model_copy(update={
+        "verdict": "UNCONFIRMED_HIGH_DAMAGE",
+        "interpretation": (
+            f"Verdict downgraded to UNCONFIRMED_HIGH_DAMAGE: "
+            f"the verdict depends on the random seed ({_note}). "
+            "The audit result is not stable at this sample size. "
+            "Collect more data or increase n_permutations for a stable verdict."
+        ),
+    })
+
+    return _make_unconfirmed_report(
+        engine_detection=primary_report.engine_detection,
+        measured_damage=primary_report.measured_damage,
+        policy_decision=_new_pd,
+        fold_ci=_unstable_fold_ci,
+        structural_annotations=list(primary_report.structural_annotations),
     )

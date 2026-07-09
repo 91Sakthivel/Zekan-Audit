@@ -25,6 +25,8 @@ def _run_audit_pipeline(
     model_factory=None,
     estimator_identity: str = "default",
     n_jobs: int = 1,
+    stability: bool = False,
+    seeds: int = 5,
 ) -> tuple:  # (VerdictReport | None, provenance_dict | None)
     """Load config+data, validate contract, run audit. Returns (None, None) on early stop.
 
@@ -130,6 +132,34 @@ def _run_audit_pipeline(
     )
 
     _report = run_audit(df, cfg.contract, cfg, model_factory=model_factory, n_jobs=n_jobs)
+
+    # ── seed-stability check (opt-in) ─────────────────────────────────────────
+    if stability:
+        from zekan.severity.verdict import _apply_seed_stability
+        typer.echo(
+            f"Stability check: running audit across {seeds} null seeds...",
+            err=json_mode,
+        )
+        _verdicts: list[str] = [_report.policy_decision.verdict]
+        for _seed_i in range(1, seeds):
+            _r_i = run_audit(
+                df, cfg.contract, cfg,
+                model_factory=model_factory,
+                n_jobs=n_jobs,
+                null_seed=_seed_i,
+            )
+            _verdicts.append(_r_i.policy_decision.verdict)
+        _report = _apply_seed_stability(_report, _verdicts)
+        _stable = len(set(_verdicts)) <= 1
+        _dist_str = ", ".join(
+            f"{_v}:{_verdicts.count(_v)}"
+            for _v in dict.fromkeys(_verdicts)
+        )
+        typer.echo(
+            f"Stability check: {'stable' if _stable else 'UNSTABLE'} ({_dist_str})",
+            err=json_mode,
+        )
+
     _provenance = build_provenance(
         data_hash=hash_dataframe(df),
         contract_hash=hash_contract(cfg.contract),
@@ -173,6 +203,16 @@ def audit(
         "--jobs",
         help="Parallel workers for per-feature ablation (default 1 = serial). Uses loky process pool.",
     ),
+    stability: bool = typer.Option(
+        False,
+        "--stability",
+        help="Rerun the audit across N null seeds; downgrade to INCONCLUSIVE if the verdict depends on the seed.",
+    ),
+    seeds: int = typer.Option(
+        5,
+        "--seeds",
+        help="Number of null seeds for --stability (must be >= 2).",
+    ),
 ) -> None:
     """Audit a model for data-leakage and trust issues."""
     import sys
@@ -180,6 +220,13 @@ def audit(
         sys.stdout.reconfigure(encoding="utf-8")
     except Exception:
         pass
+
+    if stability and seeds < 2:
+        typer.echo(
+            f"ERROR: --seeds must be >= 2 (got {seeds}). Use --seeds 2 or higher.",
+            err=True,
+        )
+        raise typer.Exit(1)
 
     model_factory = None
     if estimator is not None:
@@ -194,6 +241,8 @@ def audit(
         model_factory=model_factory,
         estimator_identity=estimator_identity,
         n_jobs=jobs,
+        stability=stability,
+        seeds=seeds,
     )
     if audit_report is None:
         if fail_if_inflation_greater_than is not None and not dry_run:
