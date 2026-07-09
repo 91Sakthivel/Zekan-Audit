@@ -99,6 +99,14 @@ def _render_actionable(
                 "  These features overlap — fixing one may not be enough; "
                 "address them together."
             )
+            for entry in ablated:
+                ap = entry.apportioned_leakage
+                if not math.isnan(ap):
+                    lines.append(
+                        f"    feature '{entry.feature}': alone shows "
+                        f"{entry.leakage_estimate:+.4f}, but contributes {ap:+.4f} "
+                        "once correlated features are removed (they were masking it)."
+                    )
 
         top_feature = ablated[0].feature
         lines.append("")
@@ -151,6 +159,14 @@ def _render_inconclusive(
                 "  These features overlap — fixing one may not be enough; "
                 "address them together."
             )
+            for entry in ablated:
+                ap = entry.apportioned_leakage
+                if not math.isnan(ap):
+                    lines.append(
+                        f"    feature '{entry.feature}': alone shows "
+                        f"{entry.leakage_estimate:+.4f}, but contributes {ap:+.4f} "
+                        "once correlated features are removed (they were masking it)."
+                    )
 
         top_feature = ablated[0].feature
         lines.append("")
