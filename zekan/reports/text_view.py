@@ -10,7 +10,7 @@ import math
 from typing import Optional
 
 from zekan.severity.ablation import AblationEntry, AblationSummary
-from zekan.severity.verdict import VerdictReport
+from zekan.severity.verdict import FoldCI, VerdictReport
 from zekan.reports.markers import marker as _marker, sanitize as _sanitize
 import zekan.reports.messages as _MSG
 
@@ -26,6 +26,8 @@ def render_verdict(report: VerdictReport, stream=None) -> str:
     attribution = report.measured_damage.feature_attribution
     annotations = report.structural_annotations
 
+    fold_ci = report.fold_ci
+
     if verdict in ("PASS", "NOTE"):
         text = _render_trusted(_marker("trusted", stream), annotations=annotations)
     elif verdict == "WARN":
@@ -35,6 +37,7 @@ def render_verdict(report: VerdictReport, stream=None) -> str:
             fl=fl,
             attribution=attribution,
             annotations=annotations,
+            fold_ci=fold_ci,
         )
     elif verdict == "FAIL":
         text = _render_actionable(
@@ -43,6 +46,7 @@ def render_verdict(report: VerdictReport, stream=None) -> str:
             fl=fl,
             attribution=attribution,
             annotations=annotations,
+            fold_ci=fold_ci,
         )
     elif verdict == "UNCONFIRMED_HIGH_DAMAGE":
         text = _render_inconclusive(
@@ -50,6 +54,7 @@ def render_verdict(report: VerdictReport, stream=None) -> str:
             fl=fl,
             attribution=attribution,
             annotations=annotations,
+            fold_ci=fold_ci,
         )
     else:
         text = _render_trusted(_marker("trusted", stream), annotations=annotations)
@@ -79,12 +84,21 @@ def _render_actionable(
     fl: float,
     attribution: Optional[AblationSummary],
     annotations=None,
+    fold_ci: Optional[FoldCI] = None,
 ) -> str:
     lines: list[str] = [marker, translation, ""]
 
     lines.append("THE DAMAGE")
     lines.append("  Your reported accuracy is inflated — real performance will be lower.")
     lines.append(f"    inflation: {fl:+.4f} AUC (B−C fixable leakage)")
+    if fold_ci is not None and fold_ci.folds_skipped > 0:
+        lines.append(
+            f"    note: {fold_ci.folds_skipped} fold(s) skipped "
+            f"({fold_ci.folds_evaluated} of "
+            f"{fold_ci.folds_evaluated + fold_ci.folds_skipped} evaluated)"
+            + (f" — {fold_ci.skip_reasons[0]}" if fold_ci.skip_reasons else "")
+            + "."
+        )
 
     ablated = _sorted_ablated(attribution)
     if ablated:
@@ -135,17 +149,27 @@ def _render_inconclusive(
     fl: float,
     attribution: Optional[AblationSummary],
     annotations: list | None = None,
+    fold_ci: Optional[FoldCI] = None,
 ) -> str:
-    lines: list[str] = [
-        banner,
-        _MSG.TRANSLATION_INCONCLUSIVE,
-        "",
+    lines: list[str] = [banner, _MSG.TRANSLATION_INCONCLUSIVE, ""]
+
+    if fold_ci is not None and fold_ci.folds_skipped > 0:
+        lines.append(
+            f"  Fold coverage: {fold_ci.folds_skipped} fold(s) skipped "
+            f"({fold_ci.folds_evaluated} of "
+            f"{fold_ci.folds_evaluated + fold_ci.folds_skipped} evaluated)"
+            + (f" — {fold_ci.skip_reasons[0]}" if fold_ci.skip_reasons else "")
+            + "."
+        )
+        lines.append("")
+
+    lines.extend([
         "THE DAMAGE",
         (
             f"  Possible inflation: {fl:+.4f} AUC "
             "(unconfirmed — permutation null did not reach significance)"
         ),
-    ]
+    ])
 
     ablated = _sorted_ablated(attribution)
     if ablated:

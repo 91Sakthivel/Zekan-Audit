@@ -238,7 +238,17 @@ class FoldCI(BaseModel):
     """Empty when estimate is stable.  Non-empty flags:
       'insufficient folds for interval (df<=0)'
       'fl below action floor; precision not meaningful'
+      'insufficient evaluable folds: N of M evaluated (need min_valid_folds=K)'
     """
+
+    folds_evaluated: int = 0
+    """Number of temporal folds evaluated (non-skipped) for B/C scoring."""
+
+    folds_skipped: int = 0
+    """Number of temporal folds skipped due to viability constraints."""
+
+    skip_reasons: list[str] = Field(default_factory=list)
+    """Distinct skip reason strings from skipped folds, de-duplicated in first-seen order."""
 
 
 class VerdictReport(BaseModel):
@@ -278,8 +288,10 @@ class VerdictReport(BaseModel):
 
 # ── Fold-CI computation (Phase 5) ─────────────────────────────────────────────
 
-def _compute_fold_ci(result: SeverityResult, warn_floor: float) -> FoldCI:
-    """Compute fold-level t-CI and assign confidence tier.
+def _compute_fold_ci(
+    result: SeverityResult, warn_floor: float, min_valid_folds: int = 3
+) -> FoldCI:
+    """Compute fold-level t-CI, assign confidence tier, and surface fold counts.
 
     Confidence reflects how stably the K interior temporal folds agree on the
     leakage magnitude.  It is NOT severity: the tier describes precision, not
@@ -287,6 +299,31 @@ def _compute_fold_ci(result: SeverityResult, warn_floor: float) -> FoldCI:
 
     Pooled OOF fixable_leakage is kept as the primary damage estimate throughout.
     """
+    # ── Fold count transparency ───────────────────────────────────────────────
+    _all_folds = result.folds
+    _n_skip = sum(
+        1 for f in _all_folds
+        if getattr(getattr(f, "meta", None), "skipped", False)
+    )
+    _n_eval = len(_all_folds) - _n_skip
+    _seen: dict = {}
+    for _f in _all_folds:
+        _meta = getattr(_f, "meta", None)
+        if _meta and getattr(_meta, "skipped", False):
+            _r = getattr(_meta, "skip_reason", None)
+            if _r:
+                _seen.setdefault(_r, None)
+    _skip_reasons: list[str] = list(_seen.keys())
+
+    # Only emit starvation note when the fold list was actually populated.
+    # Empty list = synthetic result or pre-fold engine state, not fold starvation.
+    _starvation_note = (
+        f"insufficient evaluable folds: {_n_eval} of {len(_all_folds)} evaluated "
+        f"(need min_valid_folds={min_valid_folds})"
+        if _all_folds and _n_eval < min_valid_folds
+        else ""
+    )
+
     pooled = result.fixable_leakage
     interior = [pf.fold_leakage for pf in result.per_fold if not pf.is_terminal]
     k = len(interior)
@@ -307,7 +344,10 @@ def _compute_fold_ci(result: SeverityResult, warn_floor: float) -> FoldCI:
             confidence_tier="low",
             confidence_calibration_status="unavailable: insufficient folds for interval",
             pooled_vs_fold_gap=gap_1,
-            instability_note="insufficient folds for interval (df<=0)",
+            instability_note=_starvation_note or "insufficient folds for interval (df<=0)",
+            folds_evaluated=_n_eval,
+            folds_skipped=_n_skip,
+            skip_reasons=_skip_reasons,
         )
 
     arr = np.array(interior, dtype=float)
@@ -331,8 +371,8 @@ def _compute_fold_ci(result: SeverityResult, warn_floor: float) -> FoldCI:
         tier = "low"
         cal_status = "provisional_awaiting_intermediate_regime"
 
-    note = ""
-    if abs(fl_mean) < warn_floor:
+    note = _starvation_note
+    if not note and abs(fl_mean) < warn_floor:
         note = "fl below action floor; precision not meaningful"
 
     return FoldCI(
@@ -349,6 +389,9 @@ def _compute_fold_ci(result: SeverityResult, warn_floor: float) -> FoldCI:
         confidence_calibration_status=cal_status,
         pooled_vs_fold_gap=gap,
         instability_note=note,
+        folds_evaluated=_n_eval,
+        folds_skipped=_n_skip,
+        skip_reasons=_skip_reasons,
     )
 
 
@@ -410,6 +453,7 @@ def build_verdict(
     warn_floor: float = _DEFAULT_WARN_FLOOR,
     fail_floor: float = _DEFAULT_FAIL_FLOOR,
     policy_profile: str = "default_auc",
+    min_valid_folds: int = 3,
 ) -> VerdictReport:
     """Assemble the four-block VerdictReport from a SeverityResult.
 
@@ -424,6 +468,10 @@ def build_verdict(
         fl threshold for FAIL verdict; default 0.15.
     policy_profile
         Descriptive name for the policy block.
+    min_valid_folds
+        Minimum evaluable temporal folds required to proceed past the fold gate.
+        When fewer folds were evaluated, verdict degrades to UNCONFIRMED_HIGH_DAMAGE.
+        Default 3; threads in from SplitPolicy.min_valid_folds via run_audit().
     """
     policy_default_used = (
         warn_floor == _DEFAULT_WARN_FLOOR and fail_floor == _DEFAULT_FAIL_FLOOR
@@ -479,7 +527,61 @@ def build_verdict(
         )
 
     # ── fold-CI (Phase 5 confidence layer) ───────────────────────────────────
-    fold_ci = _compute_fold_ci(result, warn_floor)
+    fold_ci = _compute_fold_ci(result, warn_floor, min_valid_folds)
+
+    # ── min-evaluable gate ────────────────────────────────────────────────────
+    # Guard: only fire when result.folds is populated (splitter ran).  An empty
+    # fold list means the engine never attempted fold construction (unavailable
+    # path, synthetic result, or pre-fold engine state) — not fold starvation.
+    if result.folds and fold_ci.folds_evaluated < min_valid_folds:
+        _fl_g = result.fixable_leakage
+        _mean_b_g = result.naive_auc - result.nonfixable_optimism
+        _total_folds_g = fold_ci.folds_evaluated + fold_ci.folds_skipped
+        return VerdictReport(
+            engine_detection=EngineDetection(
+                detected=False,
+                p_value=result.p_value,
+                nsl=result.nsl,
+                alpha=_NULL_ALPHA,
+                confidence="unavailable",
+                interpretation=(
+                    f"Fold evaluation insufficient: "
+                    f"{fold_ci.folds_evaluated} of {_total_folds_g} folds evaluated "
+                    f"(min_valid_folds={min_valid_folds}). "
+                    "Detection gate not reached."
+                ),
+            ),
+            measured_damage=MeasuredDamage(
+                metric="roc_auc",
+                fixable_leakage=_fl_g,
+                optimism_decomposition=OptimismDecomposition(
+                    naive_auc=result.naive_auc,
+                    temporal_all_auc=_mean_b_g,
+                    deployable_auc=result.estimated_deployable_auc,
+                ),
+                interpretation=(
+                    f"Possible inflation: {_fl_g:+.4f} AUC — unconfirmed; "
+                    f"insufficient evaluable folds "
+                    f"({fold_ci.folds_evaluated} of {_total_folds_g})."
+                ),
+                feature_attribution=result.feature_attribution,
+            ),
+            policy_decision=PolicyDecision(
+                policy_profile=policy_profile,
+                warn_floor=warn_floor,
+                fail_floor=fail_floor,
+                user_overridable=True,
+                verdict="UNCONFIRMED_HIGH_DAMAGE",
+                policy_default_used=policy_default_used,
+                interpretation=(
+                    f"Verdict degraded to UNCONFIRMED_HIGH_DAMAGE: only "
+                    f"{fold_ci.folds_evaluated} evaluable fold(s), "
+                    f"need {min_valid_folds}. "
+                    "Collect more data or adjust split_policy.min_valid_folds."
+                ),
+            ),
+            fold_ci=fold_ci,
+        )
 
     # ── engine_detection block ────────────────────────────────────────────────
     detected = bool(

@@ -134,6 +134,7 @@ def run_audit(
         warn_floor=warn_floor,
         fail_floor=fail_floor,
         policy_profile=policy_profile,
+        min_valid_folds=config.split_policy.min_valid_folds,
     )
 
     annotations = _run_structural_probes(df, contract, folds=severity_result.folds)
