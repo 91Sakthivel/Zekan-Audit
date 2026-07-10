@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Optional
 
 import yaml
 
@@ -14,13 +15,16 @@ def build_contract_mapping(
     target: str,
     available_features_until: str,
     forbidden_after_prediction: list[str],
+    data_path: Optional[str] = None,
 ) -> dict:
     """Return an ordered mapping {"contract": {...}} for yaml.safe_dump.
 
     Field order matches PredictionContract's required fields exactly.
     forbidden_after_prediction is always included, even when empty.
+    When data_path is given, a top-level "data" key is included alongside
+    "contract" so the written config declares its own dataset path.
     """
-    return {
+    mapping = {
         "contract": {
             "prediction_problem": prediction_problem,
             "entity_id": entity_id,
@@ -30,6 +34,9 @@ def build_contract_mapping(
             "forbidden_after_prediction": forbidden_after_prediction,
         }
     }
+    if data_path is not None:
+        mapping["data"] = data_path
+    return mapping
 
 
 def validate_mapping(mapping: dict) -> None:

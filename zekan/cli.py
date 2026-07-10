@@ -18,7 +18,7 @@ _WIDTH = 64
 # ── Shared pipeline ───────────────────────────────────────────────────────────
 
 def _run_audit_pipeline(
-    data: str,
+    data: Optional[str],
     config: str,
     dry_run: bool = False,
     json_mode: bool = False,
@@ -56,8 +56,26 @@ def _run_audit_pipeline(
         typer.echo(f"ERROR: invalid config: {e}", err=json_mode)
         raise typer.Exit(1)
 
+    # ── resolve data path (explicit --data wins over cfg.data) ─────────────────
+    if data is not None:
+        effective_data = data
+        data_source = "flag"
+    elif cfg.data is not None:
+        _cfg_data_path = Path(cfg.data)
+        if _cfg_data_path.is_absolute():
+            effective_data = str(_cfg_data_path)
+        else:
+            effective_data = str(config_path.parent / cfg.data)
+        data_source = "config"
+    else:
+        typer.echo(
+            "ERROR: no data file specified. Pass --data PATH or add 'data:' to zekan.yml.",
+            err=True,
+        )
+        raise typer.Exit(1)
+
     # ── load data ─────────────────────────────────────────────────────────────
-    data_path = Path(data)
+    data_path = Path(effective_data)
     try:
         suffix = data_path.suffix.lower()
         if suffix == ".csv":
@@ -83,6 +101,8 @@ def _run_audit_pipeline(
 
     if result.passed and result.can_compute_severity:
         typer.echo("READY: contract valid, severity computable", err=json_mode)
+        if data_source == "config":
+            typer.echo(f"  data: {effective_data} (from zekan.yml)", err=json_mode)
     elif result.passed:
         typer.echo(
             "CONTRACT VALID - severity cannot be computed "
@@ -175,8 +195,12 @@ def _run_audit_pipeline(
 
 @app.command()
 def audit(
-    data: str = typer.Option(..., "--data", help="Path to dataset (CSV or Parquet)."),
-    config: str = typer.Option(..., "--config", help="Path to zekan config YAML."),
+    data: Optional[str] = typer.Option(
+        None, "--data", help="Path to dataset (CSV or Parquet). Overrides 'data:' in config."
+    ),
+    config: Optional[str] = typer.Option(
+        None, "--config", help="Path to zekan config YAML. Defaults to zekan.yml in the current directory."
+    ),
     dry_run: bool = typer.Option(False, "--dry-run", help="Validate contract and stop; do not train or score."),
     fail_if_inflation_greater_than: Optional[float] = typer.Option(
         None,
@@ -234,8 +258,9 @@ def audit(
         model_factory = _build_factory(estimator)
 
     estimator_identity = estimator if estimator is not None else "default"
+    effective_config = config or "zekan.yml"
     audit_report, provenance = _run_audit_pipeline(
-        data, config,
+        data, effective_config,
         dry_run=dry_run,
         json_mode=json_output,
         model_factory=model_factory,
@@ -523,6 +548,10 @@ def init(
     forbidden_after_prediction = _pick_many("forbidden_after_prediction")
 
     # ── build + validate ───────────────────────────────────────────────────────
+    # Store data path relative to the OUTPUT config's directory, so that later
+    # `Path(config).parent / cfg.data` resolves back to this same dataset.
+    import os
+    rel_data_path = os.path.relpath(data_path.resolve(), Path(out).resolve().parent)
     mapping = build_contract_mapping(
         prediction_problem=prediction_problem,
         entity_id=entity_id,
@@ -530,6 +559,7 @@ def init(
         target=target,
         available_features_until=available_features_until,
         forbidden_after_prediction=forbidden_after_prediction,
+        data_path=rel_data_path,
     )
     try:
         validate_mapping(mapping)

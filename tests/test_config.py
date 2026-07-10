@@ -47,6 +47,22 @@ def test_wrong_top_level_key_raises_helpful_error(tmp_path):
         load_config(cfg_file)
 
 
+def test_data_field_absent_defaults_to_none(tmp_path):
+    """A config without 'data:' still loads cleanly, with cfg.data == None."""
+    cfg_file = tmp_path / "zekan.yml"
+    cfg_file.write_text(_MINIMAL_VALID, encoding="utf-8")
+    cfg = load_config(cfg_file)
+    assert cfg.data is None
+
+
+def test_data_field_present_populates_cfg_data(tmp_path):
+    """A config with 'data:' populates cfg.data with the given string."""
+    cfg_file = tmp_path / "zekan.yml"
+    cfg_file.write_text(_MINIMAL_VALID + "data: mydata.csv\n", encoding="utf-8")
+    cfg = load_config(cfg_file)
+    assert cfg.data == "mydata.csv"
+
+
 def test_missing_prediction_problem_names_field(tmp_path):
     """Valid 'contract' key but no prediction_problem → ValidationError naming the field."""
     cfg_file = tmp_path / "zekan.yml"

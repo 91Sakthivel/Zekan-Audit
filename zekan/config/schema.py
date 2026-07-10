@@ -107,6 +107,7 @@ class ZekanConfig(BaseModel):
     model: Optional[ModelSpec] = None
     split_policy: SplitPolicy = Field(default_factory=SplitPolicy)
     severity: SeverityConfig = Field(default_factory=SeverityConfig)
+    data: Optional[str] = None  # path to the dataset, relative to this config file's directory
 
 
 _KNOWN_WRONG_KEYS = {"prediction_contract", "zekan", "config", "gotcha"}

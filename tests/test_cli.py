@@ -359,6 +359,170 @@ def test_audit_wrong_top_level_key_exits_1_with_helpful_message(tmp_path):
     assert "did you mean 'contract'" in result.output
 
 
+# ── Config-declared data path tests ───────────────────────────────────────────
+
+def test_data_flag_overrides_config_data(tmp_path, monkeypatch):
+    """Explicit --data wins over cfg.data even when cfg.data points elsewhere."""
+    monkeypatch.setattr("zekan.severity.metrics._default_model_factory", _fast_clf)
+
+    df = make_clean_dataset(n_entities=_N_ENTITIES, snapshots_per_entity=_SNAPSHOTS, seed=1)
+    real_csv = tmp_path / "real_data.csv"
+    df.to_csv(real_csv, index=False)
+
+    cfg = tmp_path / "zekan.yml"
+    cfg.write_text(_CLEAN_CONFIG + "data: does_not_exist.csv\n")
+
+    result = runner.invoke(app, [
+        "audit", "--data", str(real_csv), "--config", str(cfg), "--dry-run",
+    ])
+
+    assert result.exit_code == 0, result.output
+    assert "READY" in result.output
+    assert "does_not_exist.csv" not in result.output
+
+
+def test_config_data_used_when_flag_absent(tmp_path, monkeypatch):
+    """cfg.data is used to locate the dataset when --data is not passed."""
+    monkeypatch.setattr("zekan.severity.metrics._default_model_factory", _fast_clf)
+
+    df = make_clean_dataset(n_entities=_N_ENTITIES, snapshots_per_entity=_SNAPSHOTS, seed=1)
+    csv = tmp_path / "data.csv"
+    df.to_csv(csv, index=False)
+
+    cfg = tmp_path / "zekan.yml"
+    cfg.write_text(_CLEAN_CONFIG + "data: data.csv\n")
+
+    result = runner.invoke(app, ["audit", "--config", str(cfg), "--dry-run"])
+
+    assert result.exit_code == 0, result.output
+    assert "READY" in result.output
+
+
+def test_neither_data_flag_nor_config_data_teaching_error(tmp_path):
+    """No --data and no cfg.data → teaching error to stderr, exit 1."""
+    cfg = tmp_path / "zekan.yml"
+    cfg.write_text(_CLEAN_CONFIG)
+
+    result = runner.invoke(app, ["audit", "--config", str(cfg)])
+
+    assert result.exit_code == 1
+    assert "no data file specified" in result.stderr
+    assert "--data" in result.stderr
+    assert "zekan.yml" in result.stderr
+
+
+def test_audit_auto_finds_zekan_yml_in_cwd(tmp_path, monkeypatch):
+    """Bare `zekan audit` (no --config, no --data) uses zekan.yml + its data: in cwd."""
+    monkeypatch.setattr("zekan.severity.metrics._default_model_factory", _fast_clf)
+    monkeypatch.chdir(tmp_path)
+
+    df = make_clean_dataset(n_entities=_N_ENTITIES, snapshots_per_entity=_SNAPSHOTS, seed=1)
+    df.to_csv(tmp_path / "data.csv", index=False)
+    (tmp_path / "zekan.yml").write_text(_CLEAN_CONFIG + "data: data.csv\n")
+
+    result = runner.invoke(app, ["audit", "--dry-run"])
+
+    assert result.exit_code == 0, result.output
+    assert "READY" in result.output
+
+
+def test_config_data_resolved_against_config_dir_not_cwd(tmp_path, monkeypatch):
+    """cfg.data is resolved relative to the config file's directory, not cwd."""
+    monkeypatch.setattr("zekan.severity.metrics._default_model_factory", _fast_clf)
+
+    cfg_dir = tmp_path / "cfgdir"
+    cfg_dir.mkdir()
+    other_dir = tmp_path / "elsewhere"
+    other_dir.mkdir()
+
+    df = make_clean_dataset(n_entities=_N_ENTITIES, snapshots_per_entity=_SNAPSHOTS, seed=1)
+    df.to_csv(cfg_dir / "data.csv", index=False)
+    (cfg_dir / "zekan.yml").write_text(_CLEAN_CONFIG + "data: data.csv\n")
+
+    monkeypatch.chdir(other_dir)
+
+    result = runner.invoke(app, [
+        "audit", "--config", str(cfg_dir / "zekan.yml"), "--dry-run",
+    ])
+
+    assert result.exit_code == 0, result.output
+    assert "READY" in result.output
+
+
+def test_echo_reports_data_source_when_from_config(tmp_path, monkeypatch):
+    """When data comes from cfg.data, stderr echoes which file was used."""
+    monkeypatch.setattr("zekan.severity.metrics._default_model_factory", _fast_clf)
+
+    df = make_clean_dataset(n_entities=_N_ENTITIES, snapshots_per_entity=_SNAPSHOTS, seed=1)
+    csv = tmp_path / "data.csv"
+    df.to_csv(csv, index=False)
+    cfg = tmp_path / "zekan.yml"
+    cfg.write_text(_CLEAN_CONFIG + "data: data.csv\n")
+
+    result = runner.invoke(app, ["audit", "--config", str(cfg), "--dry-run"])
+
+    assert result.exit_code == 0, result.output
+    # No --json: human text (including the echo) goes to stdout, per err=json_mode.
+    assert "(from zekan.yml)" in result.output
+    assert "data.csv" in result.output
+
+
+def test_echo_absent_when_data_from_flag(tmp_path, monkeypatch):
+    """When --data is given explicitly, no '(from zekan.yml)' echo appears."""
+    monkeypatch.setattr("zekan.severity.metrics._default_model_factory", _fast_clf)
+
+    df = make_clean_dataset(n_entities=_N_ENTITIES, snapshots_per_entity=_SNAPSHOTS, seed=1)
+    csv = tmp_path / "data.csv"
+    df.to_csv(csv, index=False)
+    cfg = tmp_path / "zekan.yml"
+    cfg.write_text(_CLEAN_CONFIG)
+
+    result = runner.invoke(app, ["audit", "--data", str(csv), "--config", str(cfg), "--dry-run"])
+
+    assert result.exit_code == 0, result.output
+    assert "(from zekan.yml)" not in result.output
+
+
+def test_json_stdout_clean_when_data_from_config(tmp_path, monkeypatch):
+    """--json with cfg.data: stdout parses as JSON; the echo line stays on stderr."""
+    monkeypatch.setattr("zekan.severity.metrics._default_model_factory", _fast_clf)
+
+    df = make_clean_dataset(n_entities=_N_ENTITIES, snapshots_per_entity=_SNAPSHOTS, seed=1)
+    csv = tmp_path / "data.csv"
+    df.to_csv(csv, index=False)
+    cfg = tmp_path / "zekan.yml"
+    cfg.write_text(_CLEAN_CONFIG + "data: data.csv\n")
+
+    result = runner.invoke(app, ["audit", "--config", str(cfg), "--json"])
+
+    assert result.exit_code == 0, result.output
+    parsed = json.loads(result.stdout)
+    assert isinstance(parsed, dict)
+    assert "(from zekan.yml)" not in result.stdout
+    assert "(from zekan.yml)" in result.stderr
+    assert "data.csv" in result.stderr
+
+
+def test_explicit_data_config_byte_identical_json(tmp_path, monkeypatch):
+    """With --data and --config both given explicitly, --json output is unchanged (regression guard)."""
+    monkeypatch.setattr("zekan.severity.metrics._default_model_factory", _fast_clf)
+    monkeypatch.setattr("zekan.severity.ablation._default_factory", _fast_clf)
+
+    df = make_clean_dataset(n_entities=_N_ENTITIES, snapshots_per_entity=_SNAPSHOTS, seed=1)
+    csv = tmp_path / "data.csv"
+    cfg = tmp_path / "zekan.yml"
+    df.to_csv(csv, index=False)
+    cfg.write_text(_CLEAN_CONFIG)
+
+    args = ["audit", "--data", str(csv), "--config", str(cfg), "--json"]
+    r1 = runner.invoke(app, args)
+    r2 = runner.invoke(app, args)
+
+    assert r1.exit_code == 0, r1.output
+    assert r2.exit_code == 0, r2.output
+    assert r1.stdout == r2.stdout
+
+
 # ── --json flag tests ─────────────────────────────────────────────────────────
 
 def test_json_stdout_is_parseable(tmp_path, monkeypatch):

@@ -72,6 +72,17 @@ def test_build_contract_mapping_with_forbidden():
     assert m["contract"]["forbidden_after_prediction"] == ["x", "y"]
 
 
+def test_build_contract_mapping_data_path_omitted_by_default():
+    m = build_contract_mapping("p", "e", "t", "tgt", "afu", [])
+    assert "data" not in m
+
+
+def test_build_contract_mapping_data_path_included_when_given():
+    m = build_contract_mapping("p", "e", "t", "tgt", "afu", [], data_path="data.csv")
+    assert m["data"] == "data.csv"
+    assert list(m.keys()) == ["contract", "data"]
+
+
 # ── Unit: validate_mapping ────────────────────────────────────────────────────
 
 def test_validate_mapping_accepts_good_mapping():
@@ -214,3 +225,60 @@ def test_init_no_clobber_declined_file_unchanged(tmp_path):
         "File must not have been changed when overwrite was declined"
     )
     assert "Aborted" in result.output
+
+
+# ── CLI: init → audit round trip ──────────────────────────────────────────────
+
+def test_init_writes_relative_data_path(tmp_path):
+    """init writes a 'data:' key relative to the config's own directory."""
+    csv = tmp_path / "data.csv"
+    out = tmp_path / "zekan.yml"
+    csv.write_text(_CSV_CONTENT, encoding="utf-8")
+
+    result = runner.invoke(
+        app,
+        ["init", "--data", str(csv), "--out", str(out)],
+        input=_HAPPY_INPUT,
+    )
+
+    assert result.exit_code == 0, result.output
+    cfg = load_config(out)
+    assert cfg.data is not None
+    # Resolved against the config's own directory, it must land back on the same file.
+    resolved = (out.parent / cfg.data).resolve()
+    assert resolved == csv.resolve()
+
+
+def test_init_then_bare_audit_uses_same_file(tmp_path, monkeypatch):
+    """The full zero-flag arc: init writes data:, then a bare `zekan audit` finds it."""
+    from zekan.benchmark.fixtures import make_clean_dataset
+    from sklearn.ensemble import RandomForestClassifier
+
+    def _fast_clf():
+        return RandomForestClassifier(n_estimators=5, random_state=0)
+
+    monkeypatch.setattr("zekan.severity.metrics._default_model_factory", _fast_clf)
+    monkeypatch.chdir(tmp_path)
+
+    df = make_clean_dataset(n_entities=200, snapshots_per_entity=6, seed=1)
+    csv = tmp_path / "data.csv"
+    df.to_csv(csv, index=False)
+
+    # Columns: entity_id(0), prediction_time(1), feature_0..feature_5(2-7), target(8).
+    assert list(df.columns)[-1] == "target"
+    target_idx = len(df.columns) - 1
+    init_result = runner.invoke(
+        app,
+        ["init", "--data", "data.csv"],
+        input=f"round-trip-problem\n0\n1\n{target_idx}\n1\n\n",
+    )
+    assert init_result.exit_code == 0, init_result.output
+    assert (tmp_path / "zekan.yml").exists()
+
+    audit_result = runner.invoke(app, ["audit", "--dry-run"])
+
+    assert audit_result.exit_code == 0, audit_result.output
+    assert "READY" in audit_result.output
+    # No --json: the echo goes to stdout (err=json_mode), and confirms which file was used.
+    assert "(from zekan.yml)" in audit_result.output
+    assert "data.csv" in audit_result.output
