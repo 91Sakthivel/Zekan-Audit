@@ -41,6 +41,10 @@ def _result(
     nsl: float | None = -1.0,
     null_iqr: float | None = 0.010,
     null_99th: float | None = 0.040,
+    p_value_across: float | None = None,
+    nsl_across: float | None = None,
+    null_iqr_across: float | None = None,
+    null_99th_across: float | None = None,
     naive_auc: float = 0.80,
     estimated_deployable_auc: float = 0.75,
     nonfixable_optimism: float = 0.02,
@@ -66,6 +70,11 @@ def _result(
         null_99th=null_99th,
         p_value=p_value,
         nsl=nsl,
+        null_iqr_across=null_iqr_across,
+        null_99th_across=null_99th_across,
+        p_value_across=p_value_across,
+        nsl_across=nsl_across,
+        n_permutations_across=100 if p_value_across is not None else 0,
         unavailable_reason=unavailable_reason,
         n_permutations_run=n_permutations_run,
     )
@@ -416,3 +425,68 @@ class TestBlockStructure:
         assert r2.policy_decision.verdict == r.policy_decision.verdict
         assert r2.engine_detection.detected == r.engine_detection.detected
         assert r2.fold_ci.confidence_tier == r.fold_ci.confidence_tier
+
+
+# ── Spec 1: across-entity null OR-combination + channel attribution ───────────
+# Pure synthetic SeverityResult inputs (no real permutation run) — fast unit
+# coverage of the combination logic in build_verdict.  The real permutation
+# behaviour (does across-entity actually catch what within-entity misses on
+# real data) is covered separately in tests/test_across_entity_null.py.
+
+class TestAcrossEntityDetection:
+    def test_within_only_channel(self):
+        """across defaults to not-run (None) -> detected via within alone."""
+        r = _result(p_value=0.005, nsl=2.0)
+        d = build_verdict(r).engine_detection
+        assert d.detected is True
+        assert d.detection_channel == "within_entity"
+
+    def test_across_only_channel(self):
+        r = _result(p_value=0.5, nsl=-1.0, p_value_across=0.005, nsl_across=2.0)
+        d = build_verdict(r).engine_detection
+        assert d.detected is True
+        assert d.detection_channel == "across_entity"
+
+    def test_both_channel(self):
+        r = _result(p_value=0.005, nsl=2.0, p_value_across=0.002, nsl_across=3.0)
+        d = build_verdict(r).engine_detection
+        assert d.detected is True
+        assert d.detection_channel == "both"
+
+    def test_neither_channel(self):
+        r = _result(p_value=0.5, nsl=-1.0, p_value_across=0.5, nsl_across=-1.0)
+        d = build_verdict(r).engine_detection
+        assert d.detected is False
+        assert d.detection_channel == ""
+
+    def test_across_none_is_fail_safe_never_manufactures_detection(self):
+        """A not-run/None across null must contribute False only — it can never
+        make detected True on its own, and must not error."""
+        r = _result(p_value=0.5, nsl=-1.0)  # within not detected; across not run
+        d = build_verdict(r).engine_detection
+        assert d.detected is False
+        assert d.detection_channel == ""
+
+    def test_policy_verdict_reaches_warn_via_across_only_detection(self):
+        """An across-only detection with fl >= warn_floor must reach a
+        detected-branch verdict (NOTE/WARN/FAIL) via the OR, not
+        UNCONFIRMED_HIGH_DAMAGE (which would happen if only within-entity fed
+        the detected gate, pre-spec-1 behavior)."""
+        r = _result(
+            fixable_leakage=0.12, p_value=0.5, nsl=-1.0,
+            p_value_across=0.005, nsl_across=2.0,
+        )
+        v = build_verdict(r)
+        assert v.engine_detection.detected is True
+        assert v.policy_decision.verdict in ("NOTE", "WARN", "FAIL")
+
+    def test_within_entity_only_case_unchanged_from_pre_spec1(self):
+        """Within-entity-alone detection (across not run) must produce the exact
+        same detected/verdict outcome as before spec 1 — the within path and its
+        calibration are untouched."""
+        r = _result(fixable_leakage=0.12, p_value=0.009, nsl=3.0)
+        v = build_verdict(r)
+        assert v.engine_detection.detected is True
+        assert v.policy_decision.verdict == "WARN"
+        assert v.engine_detection.p_value == pytest.approx(0.009)
+        assert v.engine_detection.nsl == pytest.approx(3.0)

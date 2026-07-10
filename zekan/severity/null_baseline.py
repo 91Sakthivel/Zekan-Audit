@@ -4,7 +4,7 @@ NULL HYPOTHESIS: the declared forbidden features carry no genuine future informa
 The null is estimated by breaking the leakage signal while holding everything else
 (fold structure, class balance, safe-feature signal, temporal protocol) constant.
 
-Two methods:
+Three methods:
 
   within_entity (recommended)
     Shuffle each forbidden column's values within each entity's rows.
@@ -14,6 +14,26 @@ Two methods:
                 has no effect.  AUC_C_pool is pre-computed once and reused across
                 all permutations; only AUC_B is refit per draw.  ~2× faster than
                 a naive two-pass null.
+    Blind spot: a forbidden column that is CONSTANT WITHIN each entity (e.g. an
+                entity-level aggregate) is a no-op under this permutation — it
+                cannot detect leakage carried by between-entity structure.  See
+                across_entity below.
+
+  across_entity (spec 1 — closes the within-entity blind spot)
+    Shuffle each forbidden column's values across ALL rows, ignoring entity
+    boundaries entirely (no groupby).
+    Preserves:  the column's overall marginal distribution.
+    Destroys:   both the row-level temporal ordering AND the row-entity
+                association — including entity-level aggregates that are
+                constant within each entity and therefore invisible to
+                within_entity.
+    Invariant:  same AUC_C invariant as within_entity, for the same reason (C
+                never reads forbidden columns) — reuses the identical
+                precompute-once/y_pool-reuse structure.
+    No-op guard: meaningless (mathematically identical to within_entity) when
+                the dataset has fewer than 2 entities; in that case the null is
+                NOT RUN (n_permutations=0) rather than silently reporting a
+                clean result.
 
   target_within_period
     Shuffle target values within each time period.
@@ -24,7 +44,8 @@ Two methods:
     because both B and C regress to ~0.5 AUC.
 
 The within_entity method isolates the forbidden feature's contribution, giving a
-tighter null and a more interpretable p-value.
+tighter null and a more interpretable p-value.  The across_entity method trades
+some of that precision to additionally catch between-entity leakage channels.
 
 USAGE
 -----
@@ -95,6 +116,28 @@ def _permute_within_entity(
             df_perm.groupby(entity_col, sort=False)[col]
             .transform(lambda x: rng.permutation(x.values))
         )
+    return df_perm
+
+
+def _permute_across_entity(
+    df: pd.DataFrame,
+    forbidden_cols: list[str],
+    rng: np.random.Generator,
+) -> pd.DataFrame:
+    """Shuffle each forbidden column's values across ALL rows, ignoring entity.
+
+    Unlike _permute_within_entity (which shuffles inside each entity's rows
+    and so is a no-op on a column that is constant within entity), this
+    breaks the row<->entity association entirely — the mechanism needed to
+    detect leakage carried by between-entity structure (e.g. an entity-level
+    aggregate that is constant within each entity).
+
+    Row indices and all other columns are unchanged.
+    Returns a copy; never mutates the input.
+    """
+    df_perm = df.copy()
+    for col in forbidden_cols:
+        df_perm[col] = rng.permutation(df_perm[col].values)
     return df_perm
 
 
@@ -206,6 +249,10 @@ def estimate_fixable_leakage_null(
         but convergent 95th percentile at n=100.
     method
         "within_entity": shuffle forbidden columns within entity rows (recommended).
+        "across_entity": shuffle forbidden columns across all rows, ignoring entity
+            boundaries — catches leakage carried by between-entity structure that
+            within_entity cannot see.  Returns a NOT-RUN NullResult (n_permutations=0)
+            when the dataset has fewer than 2 entities.
         "target_within_period": shuffle target within time periods (comparison only).
     """
     t0 = time.perf_counter()
@@ -237,6 +284,26 @@ def estimate_fixable_leakage_null(
             p_value=_p_degen,
             method=method,
             n_permutations=n_permutations,
+            elapsed_seconds=time.perf_counter() - t0,
+        )
+
+    # No-op guard (fail-safe epistemics): across-entity permutation needs >=2
+    # entities to differ at all from within-entity permutation — with a single
+    # entity the two are mathematically identical, so an across-entity null
+    # would be redundant, not diagnostic.  Report NOT-RUN (n_permutations=0)
+    # rather than a misleading "ran and found nothing."  NaN sentinels make
+    # NOT-RUN visually unmistakable from a genuine clean result (p_value=1.0-ish).
+    if method == "across_entity" and df[contract.entity_id].nunique() < 2:
+        return NullResult(
+            observed=observed_fixable_leakage,
+            null_samples=np.array([]),
+            null_median=float("nan"),
+            null_95th=float("nan"),
+            null_99th=float("nan"),
+            null_iqr=float("nan"),
+            p_value=float("nan"),
+            method=method,
+            n_permutations=0,
             elapsed_seconds=time.perf_counter() - t0,
         )
 
@@ -289,6 +356,40 @@ def estimate_fixable_leakage_null(
             if verbose and (i + 1) % 10 == 0:
                 print(f"  [{i+1}/{n_permutations}] running...", flush=True)
 
+    elif method == "across_entity":
+        # Same AUC_C invariant as within_entity, for the same reason (C never reads
+        # forbidden columns) — reuses the identical precompute-once/y_pool-reuse
+        # structure.  Only the per-permutation forbidden-col shuffle differs
+        # (global, no groupby — see _permute_across_entity).
+        eval_c = evaluate_folds(
+            df, safe_feature_cols, contract.target, temp_folds, model_factory,
+            return_predictions=True,
+        )
+        y_pool, proba_c_pool = _pool_oof_predictions(eval_c.fold_evals, interior_fold_idxs)
+        if y_pool is None:
+            raise RuntimeError("No interior folds produced OOF predictions for AUC_C.")
+        auc_c_pool = float(roc_auc_score(y_pool, proba_c_pool))
+
+        for i in range(n_permutations):
+            df_perm = _permute_across_entity(df, forbidden_cols, rng)
+            eval_b_perm = evaluate_folds(
+                df_perm, all_feature_cols, contract.target, temp_folds, model_factory,
+                return_predictions=True,
+            )
+            # Use the SAME y_pool (target unchanged by across-entity feature permutation)
+            b_fe_by_idx = {fe.meta.fold_idx: fe for fe in eval_b_perm.fold_evals}
+            proba_b_parts = [
+                b_fe_by_idx[idx].proba
+                for idx in sorted(interior_fold_idxs)
+                if idx in b_fe_by_idx and b_fe_by_idx[idx].proba is not None
+            ]
+            if not proba_b_parts:
+                continue
+            auc_b_perm = float(roc_auc_score(y_pool, np.concatenate(proba_b_parts)))
+            null_samples.append(auc_b_perm - auc_c_pool)
+            if verbose and (i + 1) % 10 == 0:
+                print(f"  [{i+1}/{n_permutations}] running...", flush=True)
+
     elif method == "target_within_period":
         # Target is permuted → both B and C change every iteration; no invariant to exploit
         for i in range(n_permutations):
@@ -311,7 +412,10 @@ def estimate_fixable_leakage_null(
                 print(f"  [{i+1}/{n_permutations}] running...", flush=True)
 
     else:
-        raise ValueError(f"Unknown method {method!r}. Use 'within_entity' or 'target_within_period'.")
+        raise ValueError(
+            f"Unknown method {method!r}. Use 'within_entity', 'across_entity', "
+            "or 'target_within_period'."
+        )
 
     arr = np.array(null_samples)
     n_draws = len(arr)

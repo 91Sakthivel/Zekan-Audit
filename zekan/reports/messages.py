@@ -93,6 +93,15 @@ FOOTER_INCONCLUSIVE = (
     "train/test artifacts."
 )
 
+# ── Across-entity detection (spec 1) ──────────────────────────────────────────
+# Shown only when the across-entity permutation null fired (detection_channel
+# is "across_entity" or "both") — names the different leak class it catches.
+
+ACROSS_ENTITY_DETECTED = (
+    "Leakage detected via across-entity structure — a forbidden feature appears "
+    "to carry entity-level information that a within-entity check cannot see."
+)
+
 # ── Structural finding constants ──────────────────────────────────────────────
 # Shared by all four verdict states and both render surfaces (drift-lock).
 

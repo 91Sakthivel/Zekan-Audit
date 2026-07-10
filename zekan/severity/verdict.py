@@ -96,7 +96,11 @@ class OptimismDecomposition(BaseModel):
 class EngineDetection(BaseModel):
     """Null-standardized detection gate result.
 
-    detected = (p_value < alpha) AND (nsl >= 1.0).
+    detected = detected_within OR detected_across, where each channel is
+    (p_value < alpha) AND (nsl >= 1.0) computed on its own permutation null
+    (within-entity vs. across-entity; spec 1).  A not-run across-entity null
+    (p_value_across/nsl_across None) contributes False — it can never make
+    detected True on its own, only OR in with a within-entity detection.
 
     NSL (null-standardized leakage) measures how many null-IQR units the
     observed fixable_leakage sits above the permutation 99th-percentile.
@@ -111,6 +115,12 @@ class EngineDetection(BaseModel):
     nsl: Optional[float]
     alpha: float
     confidence: str
+    detection_channel: str = ""
+    """Which null channel(s) crossed the detection gate: "within_entity" |
+    "across_entity" | "both" | "" (neither fired).  Pure reporting — no new
+    threshold.  When "across_entity" or "both", the leak class is different
+    from a within-only detection: it indicates a forbidden feature carries
+    ENTITY-LEVEL information that within-entity permutation cannot see."""
     """Fold-level CI confidence tier: 'high' / 'medium' / 'low' / 'unavailable'.
 
     Mirrors fold_ci.confidence_tier.  Driven by the relative CI width of the
@@ -614,19 +624,47 @@ def build_verdict(
         )
 
     # ── engine_detection block ────────────────────────────────────────────────
-    detected = bool(
+    # Two independent channels, OR-combined (spec 1).  A not-run/None across-entity
+    # null contributes False only — fail-safe, never manufactures a detection.
+    detected_within = bool(
         result.p_value is not None
         and result.p_value < _NULL_ALPHA
         and result.nsl is not None
         and result.nsl >= _NSL_NOTE_THRESHOLD
     )
+    detected_across = bool(
+        result.p_value_across is not None
+        and result.p_value_across < _NULL_ALPHA
+        and result.nsl_across is not None
+        and result.nsl_across >= _NSL_NOTE_THRESHOLD
+    )
+    detected = detected_within or detected_across
+
+    if detected_within and detected_across:
+        detection_channel = "both"
+    elif detected_within:
+        detection_channel = "within_entity"
+    elif detected_across:
+        detection_channel = "across_entity"
+    else:
+        detection_channel = ""
 
     if detected:
-        nsl_str = f"NSL={result.nsl:.2f}"
+        _fired: list[str] = []
+        if detected_within:
+            _fired.append(
+                f"within-entity (p={result.p_value:.4f} < {_NULL_ALPHA}, "
+                f"NSL={result.nsl:.2f} >= 1.0)"
+            )
+        if detected_across:
+            _fired.append(
+                f"across-entity (p={result.p_value_across:.4f} < {_NULL_ALPHA}, "
+                f"NSL={result.nsl_across:.2f} >= 1.0)"
+            )
         det_interp = (
-            f"Temporal leakage statistically confirmed: "
-            f"p={result.p_value:.4f} < {_NULL_ALPHA} and {nsl_str} >= 1.0.  "
-            "NSL measures how many null-IQR units the observed fixable_leakage "
+            "Temporal leakage statistically confirmed via "
+            + " and ".join(_fired)
+            + ".  NSL measures how many null-IQR units the observed fixable_leakage "
             "sits above the permutation 99th-percentile — it reflects statistical "
             "power and detection confidence, not physical damage magnitude."
         )
@@ -655,6 +693,7 @@ def build_verdict(
         nsl=result.nsl,
         alpha=_NULL_ALPHA,
         confidence=fold_ci.confidence_tier,
+        detection_channel=detection_channel,
         interpretation=det_interp,
     )
 

@@ -69,6 +69,8 @@ def _severity_result(
     nsl: float | None = -1.0,
     null_iqr: float | None = 0.010,
     null_99th: float | None = 0.040,
+    p_value_across: float | None = None,
+    nsl_across: float | None = None,
     naive_auc: float = 0.80,
     estimated_deployable_auc: float = 0.75,
     nonfixable_optimism: float = 0.02,
@@ -93,6 +95,11 @@ def _severity_result(
         null_99th=null_99th,
         p_value=p_value,
         nsl=nsl,
+        null_iqr_across=0.010 if p_value_across is not None else None,
+        null_99th_across=0.040 if p_value_across is not None else None,
+        p_value_across=p_value_across,
+        nsl_across=nsl_across,
+        n_permutations_across=100 if p_value_across is not None else 0,
         n_permutations_run=n_permutations_run,
         feature_attribution=feature_attribution,
     )
@@ -585,3 +592,54 @@ def test_inconclusive_annotation_behavior_unchanged():
     out = render_verdict(_unconfirmed_structural_report(), stream=_Utf8Stream())
     assert "STRUCTURAL FINDING" in out
     assert _FakeAnnotation.what in out
+
+
+# ── Spec 1: across-entity attribution line ─────────────────────────────────────
+# Pure synthetic SeverityResult inputs — fast, no real permutation run.
+
+def test_across_entity_line_shown_on_warn_when_channel_across():
+    sr = _severity_result(
+        fixable_leakage=0.12,
+        p_value=0.5, nsl=-1.0,               # within-entity did NOT fire
+        p_value_across=0.005, nsl_across=2.0,  # across-entity fired
+        per_fold=_interior_folds([0.12, 0.11, 0.13]),
+    )
+    report = build_verdict(sr)
+    assert report.engine_detection.detection_channel == "across_entity"
+    out = render_verdict(report, stream=_Utf8Stream())
+    assert "across-entity" in out.lower()
+    assert "⚠ RISKY" in out
+
+
+def test_across_entity_line_shown_on_note_when_channel_both():
+    sr = _severity_result(
+        fixable_leakage=0.03,                 # below warn_floor -> NOTE
+        p_value=0.005, nsl=2.0,
+        p_value_across=0.005, nsl_across=2.0,
+        per_fold=_interior_folds([0.03, 0.03, 0.03]),
+    )
+    report = build_verdict(sr)
+    assert report.engine_detection.detection_channel == "both"
+    out = render_verdict(report, stream=_Utf8Stream())
+    assert "across-entity" in out.lower()
+
+
+def test_across_entity_line_absent_when_within_only():
+    """Within-entity-only detection must NOT show the across-entity line (no clutter)."""
+    sr = _severity_result(
+        fixable_leakage=0.12,
+        p_value=0.001, nsl=2.5,
+        per_fold=_interior_folds([0.12, 0.11, 0.13]),
+    )
+    report = build_verdict(sr)
+    assert report.engine_detection.detection_channel == "within_entity"
+    out = render_verdict(report, stream=_Utf8Stream())
+    assert "across-entity" not in out.lower()
+
+
+def test_across_entity_line_absent_when_pass():
+    sr = _severity_result(fixable_leakage=0.03, p_value=0.50, nsl=-0.5)
+    report = build_verdict(sr)
+    assert report.engine_detection.detection_channel == ""
+    out = render_verdict(report, stream=_Utf8Stream())
+    assert "across-entity" not in out.lower()

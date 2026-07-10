@@ -25,11 +25,15 @@ def render_verdict(report: VerdictReport, stream=None) -> str:
     fl = report.measured_damage.fixable_leakage
     attribution = report.measured_damage.feature_attribution
     annotations = report.structural_annotations
+    detection_channel = report.engine_detection.detection_channel
 
     fold_ci = report.fold_ci
 
     if verdict in ("PASS", "NOTE"):
-        text = _render_trusted(_marker("trusted", stream), annotations=annotations, fold_ci=fold_ci)
+        text = _render_trusted(
+            _marker("trusted", stream), annotations=annotations, fold_ci=fold_ci,
+            detection_channel=detection_channel,
+        )
     elif verdict == "WARN":
         text = _render_actionable(
             marker=_marker("risky", stream),
@@ -38,6 +42,7 @@ def render_verdict(report: VerdictReport, stream=None) -> str:
             attribution=attribution,
             annotations=annotations,
             fold_ci=fold_ci,
+            detection_channel=detection_channel,
         )
     elif verdict == "FAIL":
         text = _render_actionable(
@@ -47,6 +52,7 @@ def render_verdict(report: VerdictReport, stream=None) -> str:
             attribution=attribution,
             annotations=annotations,
             fold_ci=fold_ci,
+            detection_channel=detection_channel,
         )
     elif verdict == "UNCONFIRMED_HIGH_DAMAGE":
         text = _render_inconclusive(
@@ -66,8 +72,14 @@ def render_verdict(report: VerdictReport, stream=None) -> str:
 _DIVIDER = "─" * 60
 
 
-def _render_trusted(banner: str, annotations=None, fold_ci: Optional[FoldCI] = None) -> str:
+def _render_trusted(
+    banner: str, annotations=None, fold_ci: Optional[FoldCI] = None,
+    detection_channel: str = "",
+) -> str:
     lines = [banner, _MSG.TRANSLATION_TRUSTED, ""]
+    if detection_channel in ("across_entity", "both"):
+        lines.append(_MSG.ACROSS_ENTITY_DETECTED)
+        lines.append("")
     if fold_ci is not None and fold_ci.stability_seeds_checked > 0 and not fold_ci.seed_instability_note:
         lines.append(
             f"  Stability: verdict consistent across {fold_ci.stability_seeds_checked} null seeds."
@@ -90,8 +102,12 @@ def _render_actionable(
     attribution: Optional[AblationSummary],
     annotations=None,
     fold_ci: Optional[FoldCI] = None,
+    detection_channel: str = "",
 ) -> str:
     lines: list[str] = [marker, translation, ""]
+    if detection_channel in ("across_entity", "both"):
+        lines.append(_MSG.ACROSS_ENTITY_DETECTED)
+        lines.append("")
 
     lines.append("THE DAMAGE")
     lines.append("  Your reported accuracy is inflated — real performance will be lower.")

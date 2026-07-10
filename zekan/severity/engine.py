@@ -75,6 +75,19 @@ class SeverityResult:
     p_value: Optional[float] = None               # (count+1)/(N+1) Laplace-corrected; one-tailed
     nsl: Optional[float] = None                   # null-standardized leakage = (obs - q99)/IQR
     n_permutations_run: int = 0                   # 0 when null was not run
+    # Across-entity permutation null (spec 1) — additive second channel, closes the
+    # within-entity blind spot (leakage carried by between-entity structure, e.g. an
+    # entity-level aggregate constant within each entity).  None when not run: either
+    # n_permutations==0 (null skipped entirely) or the no-op guard fired (<2 entities).
+    # Uses the SAME method-agnostic live gate as within-entity (_NULL_ALPHA, NSL>=1.0);
+    # does NOT share power.py's within-entity-scoped 0.176/0.352 calibration constants.
+    null_95th_across: Optional[float] = None
+    null_99th_across: Optional[float] = None
+    null_median_across: Optional[float] = None
+    null_iqr_across: Optional[float] = None
+    p_value_across: Optional[float] = None
+    nsl_across: Optional[float] = None
+    n_permutations_across: int = 0                # 0 when the across-entity null was not run
     feature_attribution: Optional[Any] = None     # AblationSummary when ablation ran; None otherwise
     folds: list = field(default_factory=list)     # temporal FoldIndices used for B/C eval; internal only
 
@@ -152,9 +165,16 @@ def run_severity_analysis(
     fold-level variance exactly.
 
     n_permutations
-        When > 0, runs the within-entity permutation null (method a) after computing
-        fixable_leakage and stores null_95th, p_value, n_permutations_run on the result.
-        Default 0 skips the null (backward-compatible).
+        When > 0, runs BOTH the within-entity permutation null (stores null_95th,
+        p_value, nsl, n_permutations_run) AND the across-entity permutation null
+        (spec 1; stores the *_across fields, n_permutations_across) after computing
+        fixable_leakage.  The across-entity null shares n_permutations and null_seed
+        with the within-entity null and closes the within-entity blind spot: leakage
+        carried by between-entity structure (e.g. an entity-level aggregate constant
+        within each entity) that a within-entity permutation cannot see.  It is
+        additive — the within-entity fields and calibration are unaffected — and is
+        NOT RUN (fields stay None) when the dataset has fewer than 2 entities.
+        Default 0 skips both nulls (backward-compatible).
     null_seed
         RNG seed for the permutation null.  Different seeds give convergent null_95th
         at n_permutations >= 100.
@@ -325,6 +345,16 @@ def run_severity_analysis(
     nsl: Optional[float] = None
     n_permutations_run = 0
 
+    # Across-entity null (spec 1) — additive second channel; stays None unless it
+    # actually runs (see the no-op guard in estimate_fixable_leakage_null).
+    null_95th_across: Optional[float] = None
+    null_99th_across: Optional[float] = None
+    null_median_across: Optional[float] = None
+    null_iqr_across: Optional[float] = None
+    p_value_across: Optional[float] = None
+    nsl_across: Optional[float] = None
+    n_permutations_across = 0
+
     if n_permutations > 0:
         from zekan.severity.null_baseline import estimate_fixable_leakage_null
         from zekan.severity.metrics import _default_model_factory
@@ -348,6 +378,30 @@ def run_severity_analysis(
         _null_unit = max(_null.null_iqr, _NSL_EPS)
         nsl = (fixable_leakage - _null.null_99th) / _null_unit
 
+        # Second null: across-entity permutation.  Shares n_permutations and null_seed
+        # with the within-entity null for determinism (same np.random.default_rng(seed)
+        # scheme, no SeedSequence change).  Uses ONLY the method-agnostic live gate
+        # (_NULL_ALPHA, _NSL_NOTE_THRESHOLD) below — deliberately does NOT route through
+        # power.py's estimate_n_required or its 0.176/0.352 constants, which are
+        # within-entity-scoped by measurement (see power.py docstring).  An across-entity
+        # power estimate would need its own calibration sweep (F2-class gate, not built here).
+        _null_across = estimate_fixable_leakage_null(
+            df, contract, config, _null_factory,
+            observed_fixable_leakage=fixable_leakage,
+            n_permutations=n_permutations,
+            seed=null_seed,
+            method="across_entity",
+        )
+        if _null_across.n_permutations > 0:
+            null_95th_across = _null_across.null_95th
+            null_99th_across = _null_across.null_99th
+            null_median_across = _null_across.null_median
+            null_iqr_across = _null_across.null_iqr
+            p_value_across = _null_across.p_value
+            n_permutations_across = _null_across.n_permutations
+            _null_unit_across = max(_null_across.null_iqr, _NSL_EPS)
+            nsl_across = (fixable_leakage - _null_across.null_99th) / _null_unit_across
+
     return SeverityResult(
         status=_status_from_optimism(total_optimism),
         metric="roc_auc",
@@ -366,6 +420,13 @@ def run_severity_analysis(
         p_value=p_value,
         nsl=nsl,
         n_permutations_run=n_permutations_run,
+        null_95th_across=null_95th_across,
+        null_99th_across=null_99th_across,
+        null_median_across=null_median_across,
+        null_iqr_across=null_iqr_across,
+        p_value_across=p_value_across,
+        nsl_across=nsl_across,
+        n_permutations_across=n_permutations_across,
         feature_attribution=feature_attribution,
         folds=temp_folds,
     )
