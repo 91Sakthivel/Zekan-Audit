@@ -85,8 +85,16 @@ def build_provenance(
     null_seed: int,
     estimator_identity: str,
     estimator_random_state: Optional[int],
+    null_scheme: str = "spawn_v2",
 ) -> dict:
-    """Return a deterministic provenance dict — NO timestamp."""
+    """Return a deterministic provenance dict — NO timestamp.
+
+    null_scheme
+        The permutation-null seeding scheme (F2a).  "spawn_v2" is the current
+        (SeedSequence-based, n_jobs-independent) scheme.  Additive field — JSON
+        produced before F2a has no null_scheme key at all; `zekan diff` treats
+        that absence as the retired "serial_v1" scheme.
+    """
     return {
         "contract_sha256": contract_hash,
         "data_sha256": data_hash,
@@ -94,6 +102,7 @@ def build_provenance(
         "seed": {
             "estimator_random_state": estimator_random_state,
             "null_seed": null_seed,
+            "null_scheme": null_scheme,
         },
         "versions": versions,
     }

@@ -3,6 +3,7 @@
 Grounded in the measured 1/sqrt(n) null scaling law (clean-DGP, 10-period
 fixture, within_entity permutation, n_estimators=10, N=100 perms, n>=500):
   null_iqr(n) ~= 0.176 / sqrt(n)   [R2=0.978, stabilized 6-point fit]
+  SCOPED TO THE RETIRED serial_v1 stream — invalid under spawn_v2 until re-earned.
 
 DETECTION_COEFF = 2 * 0.176 = 0.352 encodes the two-gate detection condition:
   p-gate:  fl must exceed null_99th  (~1 IQR unit above the null center)

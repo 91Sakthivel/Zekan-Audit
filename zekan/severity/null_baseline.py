@@ -61,6 +61,22 @@ the null 95th percentile from two independent batches of 100 agrees within ~0.00
 (see diag_null.py).  100 is the minimum defensible count; 200 adds robustness.
 The null refits only AUC_B per permutation (AUC_C is invariant), so the marginal
 cost is one temporal CV pass per permutation (~4 model fits on the benchmark DGP).
+NOTE (F2a): the ~0.003 figure above was measured under the now-retired serial_v1
+stream (see SEEDING below); it has not been re-measured under spawn_v2.
+
+SEEDING (F2a) — within_entity and across_entity only
+-----------------------------------------------------
+Each permutation draws from an INDEPENDENT child stream:
+    children = np.random.SeedSequence(seed).spawn(n_permutations)
+Permutation i always uses children[i], regardless of n_jobs or worker scheduling
+order — null_samples is therefore identical for n_jobs=1 and n_jobs>1 (see
+_null_permutation_once).  Scheme name: "spawn_v2" (NullResult.scheme).  This
+replaced a single shared `np.random.default_rng(seed)` mutated serially across
+all permutations ("serial_v1") — that scheme could not be parallelized safely
+because permutation i's draw depended on exactly how much entropy permutations
+0..i-1 had already consumed from the same Generator.  target_within_period is
+unchanged and still uses the single shared-stream serial_v1 scheme (deferred;
+comparison-only method, not on the production call path).
 """
 
 from __future__ import annotations
@@ -95,6 +111,8 @@ class NullResult:
     method: str
     n_permutations: int
     elapsed_seconds: float = 0.0
+    scheme: str = "spawn_v2"     # seeding scheme: "spawn_v2" (within/across_entity) or
+                                  # "serial_v1" (target_within_period, unchanged)
 
 
 # ── Permutation strategies ────────────────────────────────────────────────────
@@ -158,6 +176,62 @@ def _permute_target_within_period(
         .transform(lambda x: rng.permutation(x.values))
     )
     return df_perm
+
+
+# ── Per-permutation work unit (F2a: parallel-safe, spawn_v2 seeding) ───────────
+
+def _null_permutation_once(
+    child_seed: np.random.SeedSequence,
+    df: pd.DataFrame,
+    forbidden_cols: list[str],
+    entity_col: str,
+    method: str,
+    all_feature_cols: list[str],
+    target_col: str,
+    temp_folds: list,
+    model_factory: Callable[[], Any],
+    interior_fold_idxs: set[int],
+    auc_c_pool: float,
+    y_pool: np.ndarray,
+) -> Optional[float]:
+    """Compute one permutation draw: auc_b_perm - auc_c_pool, or None when no
+    interior fold produced OOF predictions (mirrors the original `continue`
+    skip semantics exactly — a None is filtered out by the caller before the
+    null_samples array is built, never counted as a zero draw).
+
+    `child_seed` must be an independent np.random.SeedSequence (one entry from
+    np.random.SeedSequence(seed).spawn(n_permutations)) — never a live
+    np.random.Generator shared across permutations.  This is what makes the
+    result independent of n_jobs / worker scheduling: permutation i's draw
+    depends only on child_seed, never on any other permutation's draws.
+
+    Module-level so loky can pickle it by (module, qualname) — mirrors
+    zekan.severity.ablation._ablate_one.  method must be "within_entity" or
+    "across_entity"; auc_c_pool/y_pool are read-only constants shared (by
+    value) across every call, computed once by the caller before dispatch.
+    """
+    rng = np.random.default_rng(child_seed)
+    if method == "within_entity":
+        df_perm = _permute_within_entity(df, forbidden_cols, entity_col, rng)
+    elif method == "across_entity":
+        df_perm = _permute_across_entity(df, forbidden_cols, rng)
+    else:
+        raise ValueError(f"_null_permutation_once: unsupported method {method!r}")
+
+    eval_b_perm = evaluate_folds(
+        df_perm, all_feature_cols, target_col, temp_folds, model_factory,
+        return_predictions=True,
+    )
+    b_fe_by_idx = {fe.meta.fold_idx: fe for fe in eval_b_perm.fold_evals}
+    proba_b_parts = [
+        b_fe_by_idx[idx].proba
+        for idx in sorted(interior_fold_idxs)
+        if idx in b_fe_by_idx and b_fe_by_idx[idx].proba is not None
+    ]
+    if not proba_b_parts:
+        return None
+    auc_b_perm = float(roc_auc_score(y_pool, np.concatenate(proba_b_parts)))
+    return auc_b_perm - auc_c_pool
 
 
 # ── Interior fold context ─────────────────────────────────────────────────────
@@ -232,6 +306,7 @@ def estimate_fixable_leakage_null(
     seed: int = 0,
     method: str = "within_entity",
     verbose: bool = False,
+    n_jobs: int = 1,
 ) -> NullResult:
     """Estimate the permutation null distribution for fixable_leakage.
 
@@ -246,17 +321,27 @@ def estimate_fixable_leakage_null(
         higher resolution.
     seed
         RNG seed for reproducibility.  Different seeds give different null samples
-        but convergent 95th percentile at n=100.
+        but convergent 95th percentile at n=100.  For within_entity/across_entity
+        (spawn_v2), the seed feeds np.random.SeedSequence(seed).spawn(n_permutations)
+        — permutation i always uses child i, so results are independent of n_jobs.
     method
         "within_entity": shuffle forbidden columns within entity rows (recommended).
         "across_entity": shuffle forbidden columns across all rows, ignoring entity
             boundaries — catches leakage carried by between-entity structure that
             within_entity cannot see.  Returns a NOT-RUN NullResult (n_permutations=0)
             when the dataset has fewer than 2 entities.
-        "target_within_period": shuffle target within time periods (comparison only).
+        "target_within_period": shuffle target within time periods (comparison only);
+            still uses the single shared-stream serial_v1 scheme (deferred, not
+            parallelized).
+    n_jobs
+        Parallel workers for within_entity/across_entity permutations (loky backend
+        via joblib).  Default 1 = serial, using the SAME spawn_v2 child-stream
+        scheme as the parallel path — null_samples is byte-identical regardless of
+        n_jobs.  Has no effect on target_within_period (always serial).
     """
     t0 = time.perf_counter()
     rng = np.random.default_rng(seed)
+    _scheme = "spawn_v2" if method in ("within_entity", "across_entity") else "serial_v1"
 
     policy = config.split_policy
     all_feature_cols = [
@@ -285,6 +370,7 @@ def estimate_fixable_leakage_null(
             method=method,
             n_permutations=n_permutations,
             elapsed_seconds=time.perf_counter() - t0,
+            scheme=_scheme,
         )
 
     # No-op guard (fail-safe epistemics): across-entity permutation needs >=2
@@ -305,6 +391,7 @@ def estimate_fixable_leakage_null(
             method=method,
             n_permutations=0,
             elapsed_seconds=time.perf_counter() - t0,
+            scheme=_scheme,
         )
 
     # Build temporal folds (same structure as the engine uses)
@@ -322,9 +409,10 @@ def estimate_fixable_leakage_null(
 
     null_samples: list[float] = []
 
-    if method == "within_entity":
+    if method in ("within_entity", "across_entity"):
         # Invariant: AUC_C_pool doesn't change when forbidden features are permuted
-        # (C drops forbidden features entirely).  Pre-compute once and reuse.
+        # (C drops forbidden features entirely, for both permutation strategies).
+        # Pre-compute once and reuse across every permutation draw.
         eval_c = evaluate_folds(
             df, safe_feature_cols, contract.target, temp_folds, model_factory,
             return_predictions=True,
@@ -334,61 +422,37 @@ def estimate_fixable_leakage_null(
             raise RuntimeError("No interior folds produced OOF predictions for AUC_C.")
         auc_c_pool = float(roc_auc_score(y_pool, proba_c_pool))
 
-        for i in range(n_permutations):
-            df_perm = _permute_within_entity(
-                df, forbidden_cols, contract.entity_id, rng
-            )
-            eval_b_perm = evaluate_folds(
-                df_perm, all_feature_cols, contract.target, temp_folds, model_factory,
-                return_predictions=True,
-            )
-            # Use the SAME y_pool (target unchanged by within-entity feature permutation)
-            b_fe_by_idx = {fe.meta.fold_idx: fe for fe in eval_b_perm.fold_evals}
-            proba_b_parts = [
-                b_fe_by_idx[idx].proba
-                for idx in sorted(interior_fold_idxs)
-                if idx in b_fe_by_idx and b_fe_by_idx[idx].proba is not None
-            ]
-            if not proba_b_parts:
-                continue
-            auc_b_perm = float(roc_auc_score(y_pool, np.concatenate(proba_b_parts)))
-            null_samples.append(auc_b_perm - auc_c_pool)
-            if verbose and (i + 1) % 10 == 0:
-                print(f"  [{i+1}/{n_permutations}] running...", flush=True)
+        # spawn_v2 seeding: permutation i always draws from children[i], an
+        # independent child stream — never a shared, order-dependent Generator.
+        # This is what makes null_samples independent of n_jobs / scheduling.
+        children = np.random.SeedSequence(seed).spawn(n_permutations)
 
-    elif method == "across_entity":
-        # Same AUC_C invariant as within_entity, for the same reason (C never reads
-        # forbidden columns) — reuses the identical precompute-once/y_pool-reuse
-        # structure.  Only the per-permutation forbidden-col shuffle differs
-        # (global, no groupby — see _permute_across_entity).
-        eval_c = evaluate_folds(
-            df, safe_feature_cols, contract.target, temp_folds, model_factory,
-            return_predictions=True,
-        )
-        y_pool, proba_c_pool = _pool_oof_predictions(eval_c.fold_evals, interior_fold_idxs)
-        if y_pool is None:
-            raise RuntimeError("No interior folds produced OOF predictions for AUC_C.")
-        auc_c_pool = float(roc_auc_score(y_pool, proba_c_pool))
-
-        for i in range(n_permutations):
-            df_perm = _permute_across_entity(df, forbidden_cols, rng)
-            eval_b_perm = evaluate_folds(
-                df_perm, all_feature_cols, contract.target, temp_folds, model_factory,
-                return_predictions=True,
+        if n_jobs == 1:
+            raw_samples: list = []
+            for i in range(n_permutations):
+                raw_samples.append(
+                    _null_permutation_once(
+                        children[i], df, forbidden_cols, contract.entity_id, method,
+                        all_feature_cols, contract.target, temp_folds, model_factory,
+                        interior_fold_idxs, auc_c_pool, y_pool,
+                    )
+                )
+                if verbose and (i + 1) % 10 == 0:
+                    print(f"  [{i+1}/{n_permutations}] running...", flush=True)
+        else:
+            from joblib import Parallel, delayed  # noqa: PLC0415
+            raw_samples = Parallel(
+                n_jobs=n_jobs, backend="loky", verbose=10 if verbose else 0,
+            )(
+                delayed(_null_permutation_once)(
+                    children[i], df, forbidden_cols, contract.entity_id, method,
+                    all_feature_cols, contract.target, temp_folds, model_factory,
+                    interior_fold_idxs, auc_c_pool, y_pool,
+                )
+                for i in range(n_permutations)
             )
-            # Use the SAME y_pool (target unchanged by across-entity feature permutation)
-            b_fe_by_idx = {fe.meta.fold_idx: fe for fe in eval_b_perm.fold_evals}
-            proba_b_parts = [
-                b_fe_by_idx[idx].proba
-                for idx in sorted(interior_fold_idxs)
-                if idx in b_fe_by_idx and b_fe_by_idx[idx].proba is not None
-            ]
-            if not proba_b_parts:
-                continue
-            auc_b_perm = float(roc_auc_score(y_pool, np.concatenate(proba_b_parts)))
-            null_samples.append(auc_b_perm - auc_c_pool)
-            if verbose and (i + 1) % 10 == 0:
-                print(f"  [{i+1}/{n_permutations}] running...", flush=True)
+
+        null_samples = [s for s in raw_samples if s is not None]
 
     elif method == "target_within_period":
         # Target is permuted → both B and C change every iteration; no invariant to exploit
@@ -437,4 +501,5 @@ def estimate_fixable_leakage_null(
         method=method,
         n_permutations=n_draws,
         elapsed_seconds=time.perf_counter() - t0,
+        scheme=_scheme,
     )

@@ -177,7 +177,13 @@ def run_severity_analysis(
         Default 0 skips both nulls (backward-compatible).
     null_seed
         RNG seed for the permutation null.  Different seeds give convergent null_95th
-        at n_permutations >= 100.
+        at n_permutations >= 100.  Under spawn_v2 (F2a), seeds the permutation's
+        SeedSequence — results are identical for any n_jobs.
+    n_jobs
+        Parallel workers, shared by per-feature ablation AND both permutation nulls
+        (loky backend via joblib).  Default 1 = serial.  Both nulls use spawn_v2
+        seeding regardless of n_jobs, so null_samples/null_iqr/p_value/nsl are
+        byte-identical whether n_jobs=1 or n_jobs>1 — only wall-clock time changes.
     """
     policy = config.split_policy
 
@@ -365,6 +371,7 @@ def run_severity_analysis(
             n_permutations=n_permutations,
             seed=null_seed,
             method="within_entity",
+            n_jobs=n_jobs,
         )
         null_95th = _null.null_95th
         null_99th = _null.null_99th
@@ -378,19 +385,23 @@ def run_severity_analysis(
         _null_unit = max(_null.null_iqr, _NSL_EPS)
         nsl = (fixable_leakage - _null.null_99th) / _null_unit
 
-        # Second null: across-entity permutation.  Shares n_permutations and null_seed
-        # with the within-entity null for determinism (same np.random.default_rng(seed)
-        # scheme, no SeedSequence change).  Uses ONLY the method-agnostic live gate
-        # (_NULL_ALPHA, _NSL_NOTE_THRESHOLD) below — deliberately does NOT route through
-        # power.py's estimate_n_required or its 0.176/0.352 constants, which are
-        # within-entity-scoped by measurement (see power.py docstring).  An across-entity
-        # power estimate would need its own calibration sweep (F2-class gate, not built here).
+        # Second null: across-entity permutation.  Shares n_permutations, null_seed,
+        # and n_jobs with the within-entity null.  Both use the spawn_v2 seeding
+        # scheme (F2a): np.random.SeedSequence(seed).spawn(n_permutations), so
+        # results are identical regardless of n_jobs/scheduling — determinism no
+        # longer depends on a single shared serial rng.  Uses ONLY the
+        # method-agnostic live gate (_NULL_ALPHA, _NSL_NOTE_THRESHOLD) below —
+        # deliberately does NOT route through power.py's estimate_n_required or its
+        # 0.176/0.352 constants, which are within-entity-scoped by measurement (see
+        # power.py docstring).  An across-entity power estimate would need its own
+        # calibration sweep (not built here).
         _null_across = estimate_fixable_leakage_null(
             df, contract, config, _null_factory,
             observed_fixable_leakage=fixable_leakage,
             n_permutations=n_permutations,
             seed=null_seed,
             method="across_entity",
+            n_jobs=n_jobs,
         )
         if _null_across.n_permutations > 0:
             null_95th_across = _null_across.null_95th

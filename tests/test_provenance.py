@@ -183,7 +183,10 @@ def test_build_provenance_keys(simple_provenance):
 
 
 def test_build_provenance_seed_subkeys(simple_provenance):
-    assert set(simple_provenance["seed"]) == {"null_seed", "estimator_random_state"}
+    # re-baselined: F2a adds null_scheme (additive) to the seed sub-dict
+    assert set(simple_provenance["seed"]) == {
+        "null_seed", "estimator_random_state", "null_scheme",
+    }
 
 
 def test_build_provenance_no_timestamp(simple_provenance):
@@ -205,6 +208,15 @@ def test_build_provenance_custom_estimator():
 def test_build_provenance_is_json_serialisable(simple_provenance):
     text = json.dumps(simple_provenance, sort_keys=True)
     assert json.loads(text) == simple_provenance
+
+
+def test_build_provenance_null_scheme_default(simple_provenance):
+    assert simple_provenance["seed"]["null_scheme"] == "spawn_v2"
+
+
+def test_build_provenance_null_scheme_custom():
+    p = build_provenance("h1", "h2", {}, 0, "rf", 42, null_scheme="serial_v1")
+    assert p["seed"]["null_scheme"] == "serial_v1"
 
 
 # ── build_manifest ─────────────────────────────────────────────────────────────

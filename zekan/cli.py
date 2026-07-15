@@ -187,6 +187,7 @@ def _run_audit_pipeline(
         null_seed=0,
         estimator_identity=estimator_identity,
         estimator_random_state=read_estimator_random_state(model_factory),
+        null_scheme="spawn_v2",
     )
     return _report, _provenance
 
@@ -225,7 +226,8 @@ def audit(
     jobs: int = typer.Option(
         1,
         "--jobs",
-        help="Parallel workers for per-feature ablation (default 1 = serial). Uses loky process pool.",
+        help="Parallel workers for per-feature ablation and both permutation nulls "
+             "(default 1 = serial). Uses loky process pool; results are identical to serial.",
     ),
     stability: bool = typer.Option(
         False,
@@ -420,6 +422,9 @@ def diff(
 
     if "schema_mismatch" in result:
         typer.echo(f"  Note: {result['schema_mismatch']}", err=json_output)
+
+    if "null_scheme_notice" in result:
+        typer.echo(f"  Note: {result['null_scheme_notice']}", err=json_output)
 
     if fail_on_regression and result["direction"] == "REGRESSED":
         raise typer.Exit(1)

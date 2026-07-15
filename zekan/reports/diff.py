@@ -8,15 +8,36 @@ from __future__ import annotations
 from typing import Any
 
 
+def _null_scheme(d: dict) -> str:
+    """Extract the permutation-null seeding scheme from a provenance block.
+
+    JSON produced before F2a carries no null_scheme at all (provenance may even
+    be absent entirely, e.g. artifacts from commands that don't attach it) —
+    that absence is treated as the retired "serial_v1" scheme, never guessed
+    to match the other side.
+    """
+    seed_block = (d.get("provenance") or {}).get("seed") or {}
+    return seed_block.get("null_scheme") or "serial_v1"
+
+
 def diff_reports(old: dict, new: dict) -> dict:
     """Compare two verdict_to_dict outputs and return a structured diff.
 
     fixable_leakage is already null-safe (NaN → None via json_export._coerce).
     When either side is None, fl_delta is None and direction is
-    UNVERIFIABLE_CHANGE — no delta is fabricated.
+    UNVERIFIABLE_CHANGE — no delta is fabricated.  fixable_leakage does not
+    depend on the permutation-null stream, so this comparison is unaffected by
+    a null-scheme change on either side.
 
     schema_version mismatch is flagged in "schema_mismatch" but comparison
     continues on whatever fields are present.
+
+    Null-derived scalars (p_value, nsl, null_iqr, ...) are NOT compared by this
+    function today — nothing here reads them.  When the two inputs' provenance
+    carries a different null_scheme (F2a spawn_v2 vs the retired serial_v1, or
+    either side missing null_scheme entirely), "null_scheme_notice" is set so
+    callers can surface that null statistics are not comparable across schemes
+    even if a future field starts comparing them.
     """
     schema_old = old.get("schema_version")
     schema_new = new.get("schema_version")
@@ -76,5 +97,13 @@ def diff_reports(old: dict, new: dict) -> dict:
 
     if schema_old != schema_new:
         result["schema_mismatch"] = f"old={schema_old!r} new={schema_new!r}"
+
+    scheme_old = _null_scheme(old)
+    scheme_new = _null_scheme(new)
+    if scheme_old != scheme_new:
+        result["null_scheme_notice"] = (
+            f"null scheme differs ({scheme_old} vs {scheme_new}): null statistics "
+            "are not comparable across schemes; fixable_leakage comparison is unaffected."
+        )
 
     return result

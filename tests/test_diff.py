@@ -21,9 +21,15 @@ def _artifact(
     headline: str = "TRUSTED",
     top_feature=None,
     schema_version: str = "1",
+    null_scheme: str | None = None,
 ) -> dict:
-    """Minimal schema-1 artifact dict for diff testing."""
-    return {
+    """Minimal schema-1 artifact dict for diff testing.
+
+    null_scheme, when given, is nested under provenance.seed.null_scheme,
+    mirroring build_provenance's real shape (F2a).  None (default) omits
+    "provenance" entirely, matching artifacts predating F2a.
+    """
+    d: dict = {
         "schema_version": schema_version,
         "summary": {
             "fixable_leakage": fixable_leakage,
@@ -32,6 +38,9 @@ def _artifact(
             "verdict": verdict,
         },
     }
+    if null_scheme is not None:
+        d["provenance"] = {"seed": {"null_scheme": null_scheme}}
+    return d
 
 
 def _write(path, data: dict) -> None:
@@ -165,6 +174,107 @@ def test_determinism_same_inputs_identical_output():
     old = _artifact(0.2100, verdict="FAIL", headline="FAILED", top_feature="x")
     new = _artifact(0.0400, verdict="PASS", headline="TRUSTED")
     assert diff_reports(old, new) == diff_reports(old, new)
+
+
+# ── F2a: null-scheme guard ───────────────────────────────────────────────────
+# fixable_leakage does not depend on the permutation-null stream, so a scheme
+# difference must never suppress or alter the fl comparison — it only adds an
+# informational notice.  diff_reports does not compare null-derived scalars at
+# all today, so there is nothing to suppress; these tests lock the notice.
+
+def test_null_scheme_differs_sets_notice():
+    old = _artifact(0.0400, null_scheme="serial_v1")
+    new = _artifact(0.0400, null_scheme="spawn_v2")
+    d = diff_reports(old, new)
+    assert "null_scheme_notice" in d
+    assert "serial_v1" in d["null_scheme_notice"]
+    assert "spawn_v2" in d["null_scheme_notice"]
+    assert "not comparable" in d["null_scheme_notice"]
+
+
+def test_null_scheme_same_no_notice():
+    old = _artifact(0.0400, null_scheme="spawn_v2")
+    new = _artifact(0.0300, null_scheme="spawn_v2")
+    d = diff_reports(old, new)
+    assert "null_scheme_notice" not in d
+
+
+def test_null_scheme_missing_both_treated_as_serial_v1_no_notice():
+    """Two pre-F2a artifacts (no provenance at all) → both default to serial_v1
+    → schemes match → no notice, even though neither ever declared a scheme."""
+    old = _artifact(0.0400)
+    new = _artifact(0.0300)
+    d = diff_reports(old, new)
+    assert "null_scheme_notice" not in d
+
+
+def test_null_scheme_missing_on_one_side_sets_notice():
+    """Old artifact predates F2a (no null_scheme) → treated as serial_v1; new
+    is spawn_v2 → schemes differ → notice fires."""
+    old = _artifact(0.0400)  # no provenance at all
+    new = _artifact(0.0300, null_scheme="spawn_v2")
+    d = diff_reports(old, new)
+    assert "null_scheme_notice" in d
+    assert "serial_v1" in d["null_scheme_notice"]
+    assert "spawn_v2" in d["null_scheme_notice"]
+
+
+def test_null_scheme_notice_does_not_affect_fl_comparison():
+    """A scheme difference must not change direction/fl_delta — fl doesn't
+    depend on the null stream."""
+    old = _artifact(0.2100, verdict="FAIL", null_scheme="serial_v1")
+    new = _artifact(0.0400, verdict="PASS", null_scheme="spawn_v2")
+    d = diff_reports(old, new)
+    assert "null_scheme_notice" in d
+    assert d["direction"] == "IMPROVED"
+    assert d["fl_delta"] == pytest.approx(-0.1700)
+
+
+def test_cli_diff_prints_null_scheme_notice(tmp_path):
+    a = tmp_path / "old.json"
+    b = tmp_path / "new.json"
+    _write(a, _artifact(0.0400, null_scheme="serial_v1"))
+    _write(b, _artifact(0.0300, null_scheme="spawn_v2"))
+
+    result = runner.invoke(app, ["diff", "--old", str(a), "--new", str(b)])
+
+    assert result.exit_code == 0, result.output
+    assert "null scheme differs" in result.output
+    assert "not comparable across schemes" in result.output
+
+
+def test_cli_diff_fail_on_regression_silent_across_schemes_on_improvement(tmp_path):
+    """Schemes differ AND leakage improved -> --fail-on-regression must exit 0.
+
+    A trust tool must not cry regression at its own upgrade: the scheme
+    difference alone (unrelated to fl) must never be the reason this fires.
+    """
+    a = tmp_path / "old.json"
+    b = tmp_path / "new.json"
+    _write(a, _artifact(0.2100, verdict="FAIL", headline="FAILED", null_scheme="serial_v1"))
+    _write(b, _artifact(0.0400, verdict="PASS", headline="TRUSTED", null_scheme="spawn_v2"))
+
+    result = runner.invoke(app, [
+        "diff", "--old", str(a), "--new", str(b), "--fail-on-regression",
+    ])
+
+    assert result.exit_code == 0, result.output
+    assert "null scheme differs" in result.output
+
+
+def test_cli_diff_fail_on_regression_still_fires_on_real_regression_across_schemes(tmp_path):
+    """Schemes differing must not SUPPRESS a genuine fl regression either —
+    the gate is fl-only and stays fl-only regardless of scheme notices."""
+    a = tmp_path / "old.json"
+    b = tmp_path / "new.json"
+    _write(a, _artifact(0.0400, verdict="PASS", headline="TRUSTED", null_scheme="serial_v1"))
+    _write(b, _artifact(0.2100, verdict="FAIL", headline="FAILED", null_scheme="spawn_v2"))
+
+    result = runner.invoke(app, [
+        "diff", "--old", str(a), "--new", str(b), "--fail-on-regression",
+    ])
+
+    assert result.exit_code == 1
 
 
 # ── CLI tests ─────────────────────────────────────────────────────────────────
