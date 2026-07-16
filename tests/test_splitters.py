@@ -265,6 +265,22 @@ def test_drift_injectors_add_no_target_column(small_df: pd.DataFrame) -> None:
         pd.testing.assert_series_equal(small_df["target"], modified["target"])
 
 
+def test_temporal_expanding_folds_unparseable_time_col_raises_clean_error() -> None:
+    """Defense in depth: called directly (bypassing contract validation), an
+    unparseable time_col must raise a clear, typed ValueError naming the
+    column and explaining what Zekan needs -- not a raw pandas parse error
+    leaking from deep in the stack."""
+    df = pd.DataFrame({
+        "entity_id": [f"e{i}" for i in range(20)],
+        "prediction_time": [str(197661240 + i) for i in range(20)],
+        "target": [i % 2 for i in range(20)],
+    })
+    with pytest.raises(ValueError, match="prediction_time.*could not be parsed as a time signal"):
+        temporal_expanding_folds(
+            df, time_col="prediction_time", entity_col="entity_id", target_col="target",
+        )
+
+
 def test_original_df_not_mutated(small_df: pd.DataFrame) -> None:
     """Every injector must return a copy; the input df is untouched."""
     original = small_df.copy()

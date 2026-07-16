@@ -145,8 +145,22 @@ def temporal_expanding_folds(
     time block. The same entity is allowed in both train and test at different
     times — this is not leakage. Entity-overlap % is computed and attached to
     metadata as an informational diagnostic, not a failure criterion.
+
+    Defense in depth: contract_checks._check_prediction_time should already
+    have rejected an unparseable time_col before this runs. The try/except
+    below exists for callers that reach this splitter directly, bypassing
+    that gate -- it converts a raw pandas parse error into a clear, typed
+    message instead of letting an internal exception type leak to the user.
     """
-    times = pd.to_datetime(df[time_col])
+    try:
+        times = pd.to_datetime(df[time_col])
+    except (ValueError, TypeError) as e:
+        raise ValueError(
+            f"prediction_time column '{time_col}' could not be parsed as a time signal "
+            f"({type(e).__name__}: {e}). Zekan audits leakage over time and needs an "
+            f"ordered, parseable date/time column -- provide a real date/time column, or "
+            f"derive one (e.g. an ordinal period column) from your data."
+        ) from e
     sorted_periods: list = sorted(times.unique())
     n_periods = len(sorted_periods)
 

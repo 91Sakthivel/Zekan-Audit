@@ -56,6 +56,14 @@ class ValidationResult:
 # ── individual check functions ────────────────────────────────────────────────
 
 def _check_prediction_time(c: PredictionContract, df: pd.DataFrame) -> CheckResult:
+    """A prediction_time column must parse as datetime for EVERY row.
+
+    temporal_expanding_folds (splitters.py) calls pd.to_datetime on the whole
+    column with no error suppression -- a single unparseable row raises there.
+    So ANY parse failure here must FAIL the gate, not just a 100% failure: a
+    partial failure is exactly as fatal to the temporal splitter as a total
+    one, so this check has no WARN outcome -- only PASS or FAIL.
+    """
     col = c.prediction_time
     if col not in df.columns:
         return CheckResult("prediction_time_parseable", CheckStatus.FAIL,
@@ -64,10 +72,16 @@ def _check_prediction_time(c: PredictionContract, df: pd.DataFrame) -> CheckResu
     n_bad = int(parsed.isna().sum())
     if n_bad == len(df):
         return CheckResult("prediction_time_parseable", CheckStatus.FAIL,
-                           f"Column '{col}' cannot be parsed as datetime")
+                           f"Column '{col}' cannot be read as a time signal (0 of {len(df)} "
+                           f"row(s) parsed as a date/time). Zekan audits leakage over time and "
+                           f"needs an ordered, parseable time column -- provide a real date/time "
+                           f"column, or derive one (e.g. an ordinal period column) from your data.")
     if n_bad > 0:
-        return CheckResult("prediction_time_parseable", CheckStatus.WARN,
-                           f"Column '{col}' parsed as datetime but {n_bad} row(s) failed")
+        return CheckResult("prediction_time_parseable", CheckStatus.FAIL,
+                           f"Column '{col}' cannot be used as a time signal: {n_bad} of {len(df)} "
+                           f"row(s) failed to parse as a date/time, and temporal folding requires "
+                           f"every row to parse. Provide a column where every value is a valid "
+                           f"date/time, or derive one (e.g. an ordinal period column) from your data.")
     return CheckResult("prediction_time_parseable", CheckStatus.PASS,
                        f"Column '{col}' exists and parses as datetime")
 

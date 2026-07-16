@@ -115,6 +115,40 @@ def test_class_balance_message_has_no_numpy_types():
     assert "int64" not in check.message
 
 
+def test_partial_unparseable_prediction_time_fails():
+    """Some (not all) rows unparseable as datetime must FAIL, not WARN --
+    temporal_expanding_folds crashes on ANY parse failure, not just 100%."""
+    df = _make_df()
+    df = df.copy()
+    df.loc[df.index[:5], "snapshot_date"] = "not-a-date"
+    result = validate_contract(_make_contract(), df)
+
+    assert not result.passed
+    assert not result.can_compute_severity
+    check = next(c for c in result.checks if c.name == "prediction_time_parseable")
+    assert check.status == CheckStatus.FAIL
+    assert "snapshot_date" in check.message
+    assert "5" in check.message
+
+
+def test_all_unparseable_prediction_time_fails_with_teaching_message():
+    """A prediction_time column that never parses (e.g. raw large-integer visit
+    IDs, like Diabetes-130's encounter_id) must FAIL with a message that names
+    the column and says what to do about it -- not just what's wrong."""
+    df = _make_df()
+    df = df.copy()
+    df["snapshot_date"] = [str(197661240 + i) for i in range(len(df))]
+    result = validate_contract(_make_contract(), df)
+
+    assert not result.passed
+    assert not result.can_compute_severity
+    check = next(c for c in result.checks if c.name == "prediction_time_parseable")
+    assert check.status == CheckStatus.FAIL
+    assert "snapshot_date" in check.message
+    assert "time signal" in check.message
+    assert "derive" in check.message
+
+
 def test_available_features_until_after_prediction_time_fails():
     """available_features_until > prediction_time on any row must FAIL the logical check."""
     df = _make_df()
