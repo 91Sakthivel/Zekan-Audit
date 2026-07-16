@@ -1,0 +1,8 @@
+contract:
+  prediction_problem: "Will this patient be readmitted within 30 days of discharge? (Test B-2 sensitivity: planted_leak is a target-copy leak Zekan must detect.)"
+  entity_id: patient_nbr
+  prediction_time: period_ordinal
+  target: readmitted_lt30
+  available_features_until: period_ordinal
+  forbidden_after_prediction:
+    - planted_leak
