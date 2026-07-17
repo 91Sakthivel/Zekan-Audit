@@ -281,6 +281,20 @@ def test_temporal_expanding_folds_unparseable_time_col_raises_clean_error() -> N
         )
 
 
+def test_evaluate_folds_non_numeric_feature_raises_clean_error(
+    clean_df: pd.DataFrame, rand_folds: list[FoldIndices]
+) -> None:
+    """Defense in depth: called directly (bypassing contract validation), a
+    non-numeric feature column must raise a clear, typed ValueError that names
+    the problem and points back to the pre-flight check as the intended gate
+    -- not a raw pandas 'could not convert string to float' error leaking
+    from deep in the stack."""
+    df = clean_df.copy()
+    df["race"] = "Caucasian"
+    with pytest.raises(ValueError, match="Could not cast feature columns to numeric"):
+        evaluate_folds(df, ["feature_0", "race"], "target", rand_folds)
+
+
 def test_original_df_not_mutated(small_df: pd.DataFrame) -> None:
     """Every injector must return a copy; the input df is untouched."""
     original = small_df.copy()

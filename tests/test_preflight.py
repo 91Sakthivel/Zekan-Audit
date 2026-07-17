@@ -272,7 +272,7 @@ def test_preflight_note_appears_for_constant_col(tmp_path):
 def test_preflight_constant_col_does_not_change_exit_code(tmp_path):
     """A constant column must not cause a non-zero exit — warn-only."""
     df = make_clean_dataset(n_entities=_N_ENTITIES, snapshots_per_entity=_SNAPSHOTS, seed=1)
-    df["const_col"] = "fixed"
+    df["const_col"] = 0
 
     csv = tmp_path / "data.csv"
     cfg = tmp_path / "zekan.yml"

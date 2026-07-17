@@ -149,6 +149,36 @@ def test_all_unparseable_prediction_time_fails_with_teaching_message():
     assert "derive" in check.message
 
 
+def test_non_numeric_feature_column_fails():
+    """A feature column containing values that can't be cast to float must
+    FAIL -- evaluate_folds does df[feature_cols].to_numpy(dtype=float) on the
+    whole feature block for every fold, and a single non-numeric value there
+    breaks every fold, not just the row it's in."""
+    df = _make_df()
+    df = df.copy()
+    df["race"] = "Caucasian"
+    df.loc[df.index[:3], "race"] = "AfricanAmerican"
+    result = validate_contract(_make_contract(), df)
+
+    assert not result.passed
+    assert not result.can_compute_severity
+    check = next(c for c in result.checks if c.name == "feature_columns_numeric")
+    assert check.status == CheckStatus.FAIL
+    assert "race" in check.message
+    assert "numeric" in check.message.lower()
+
+
+def test_all_numeric_features_pass():
+    """A dataframe whose feature columns are all already numeric must PASS
+    feature_columns_numeric explicitly, not just implicitly via the overall
+    valid-contract test."""
+    df = _make_df()
+    result = validate_contract(_make_contract(), df)
+
+    check = next(c for c in result.checks if c.name == "feature_columns_numeric")
+    assert check.status == CheckStatus.PASS
+
+
 def test_available_features_until_after_prediction_time_fails():
     """available_features_until > prediction_time on any row must FAIL the logical check."""
     df = _make_df()

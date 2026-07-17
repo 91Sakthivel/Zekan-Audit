@@ -63,6 +63,13 @@ def evaluate_folds(
     Skipped folds are excluded from the mean. The code path is identical
     regardless of whether folds came from random_grouped_folds or
     temporal_expanding_folds; only the index arrays differ.
+
+    Defense in depth: contract_checks._check_feature_columns_numeric should
+    already have rejected any non-numeric feature column before this runs.
+    The try/except below is a should-never-happen guard for callers that reach
+    evaluate_folds directly, bypassing that gate -- it converts a raw pandas
+    cast error into a clear, typed message instead of letting an internal
+    exception type leak to the user.
     """
     if model_factory is None:
         model_factory = _default_model_factory
@@ -74,9 +81,20 @@ def evaluate_folds(
         if fold.meta.skipped:
             continue
 
-        X_train = df.iloc[fold.train_idx][feature_cols].to_numpy(dtype=float)
+        try:
+            X_train = df.iloc[fold.train_idx][feature_cols].to_numpy(dtype=float)
+            X_test = df.iloc[fold.test_idx][feature_cols].to_numpy(dtype=float)
+        except (ValueError, TypeError) as e:
+            raise ValueError(
+                f"Could not cast feature columns to numeric ({type(e).__name__}: {e}). "
+                f"This should never happen -- contract_checks._check_feature_columns_numeric "
+                f"is the intended gate for this and should have caught it before evaluate_folds "
+                f"ever ran. If you're calling evaluate_folds directly, bypassing contract "
+                f"validation, run validate_contract first. Zekan's models require every "
+                f"feature column to be numeric -- encode categorical columns (e.g. ordinal "
+                f"or one-hot encoding) before auditing this data."
+            ) from e
         y_train = df.iloc[fold.train_idx][target_col].to_numpy()
-        X_test = df.iloc[fold.test_idx][feature_cols].to_numpy(dtype=float)
         y_test = df.iloc[fold.test_idx][target_col].to_numpy()
 
         estimator = model_factory()

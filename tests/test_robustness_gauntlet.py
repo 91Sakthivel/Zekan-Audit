@@ -155,6 +155,20 @@ class TestGauntletEngineUnavailable:
         assert result.unavailable_reason is not None
         assert "time signal" in result.unavailable_reason
 
+    def test_non_numeric_feature_no_ready_then_crash(self):
+        """A feature column containing non-numeric strings (e.g. raw categorical
+        data like Diabetes-130's 'race') must be caught at the gate -- NOT
+        reported ready and then crash mid-run inside evaluate_folds's
+        to_numpy(dtype=float) cast. Regression test for the ready-then-crash
+        defect's second instance (feature columns, not prediction_time)."""
+        df = _minimal_engine_df().copy()
+        df["race"] = "Caucasian"
+        contract = _contract()
+        result = run_severity_analysis(df, contract, _make_config(contract), _fast_clf)
+        assert result.status == "unavailable"
+        assert result.unavailable_reason is not None
+        assert "numeric" in result.unavailable_reason.lower()
+
     def test_missing_declared_forbidden_column(self):
         """Contract declares a forbidden column that does not exist in the df."""
         df = _minimal_engine_df()

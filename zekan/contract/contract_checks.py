@@ -201,6 +201,47 @@ def _check_cost_model(c: PredictionContract, df: pd.DataFrame) -> CheckResult:
                        "Cost model ranges are valid (all non-negative, low <= high)")
 
 
+def _check_feature_columns_numeric(c: PredictionContract, df: pd.DataFrame) -> CheckResult:
+    """Every feature column must be castable to float for EVERY row.
+
+    evaluate_folds (metrics.py) does df[feature_cols].to_numpy(dtype=float) on
+    the whole feature block at once for every fold -- a single non-numeric
+    value in ANY feature column raises there, and it raises for every fold
+    since they all share the same feature_cols. So ANY coercion failure here
+    must FAIL the gate, not just a widespread one: this check has no WARN
+    outcome -- only PASS or FAIL, the same reasoning as prediction_time_parseable.
+
+    Candidate feature columns mirror engine._feature_cols exactly (all columns
+    except entity_id, prediction_time, available_features_until, and target).
+    forbidden_after_prediction columns are NOT excluded here: engine.py still
+    includes them in model A/B's "all_features" set, so they must be numeric
+    too, not just the columns that end up in model C's "safe_features".
+    """
+    excluded = {c.entity_id, c.prediction_time, c.available_features_until, c.target}
+    feature_cols = [col for col in df.columns if col not in excluded]
+
+    bad_cols: dict[str, int] = {}
+    for col in feature_cols:
+        coerced = pd.to_numeric(df[col], errors="coerce")
+        n_bad = int((coerced.isna() & ~df[col].isna()).sum())
+        if n_bad > 0:
+            bad_cols[col] = n_bad
+
+    if bad_cols:
+        names = list(bad_cols.keys())
+        shown = names[:10]
+        detail = ", ".join(f"'{col}' ({bad_cols[col]} value(s))" for col in shown)
+        if len(names) > 10:
+            detail += f", and {len(names) - 10} more"
+        return CheckResult("feature_columns_numeric", CheckStatus.FAIL,
+                           f"{len(bad_cols)} feature column(s) contain values that cannot be "
+                           f"read as numbers: {detail}. Zekan's models require every feature "
+                           f"column to be numeric -- encode categorical columns (e.g. ordinal "
+                           f"or one-hot encoding) before auditing this data.")
+    return CheckResult("feature_columns_numeric", CheckStatus.PASS,
+                       f"All {len(feature_cols)} feature column(s) are numeric")
+
+
 def _check_row_count_and_folds(c: PredictionContract, df: pd.DataFrame) -> CheckResult:
     n_rows = len(df)
     n_periods = int(df[c.prediction_time].nunique()) if c.prediction_time in df.columns else 0
@@ -238,6 +279,7 @@ def validate_contract(contract: PredictionContract, df: pd.DataFrame) -> Validat
         _check_target_binary(contract, df),
         _check_forbidden_columns(contract, df),
         _check_available_features_logical(contract, df),
+        _check_feature_columns_numeric(contract, df),
         _check_temporal_periods(contract, df),
         _check_target_class_balance(contract, df),
         _check_cost_model(contract, df),
