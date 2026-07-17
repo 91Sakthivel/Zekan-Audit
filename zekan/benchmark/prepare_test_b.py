@@ -2,16 +2,18 @@
 
 Produces three audit-input CSVs from the raw Diabetes-130 file, one per
 pre-registered test (see zekan/benchmark/results/TEST_B_PREREGISTRATION.md
-and its ADDENDUM_1 and ADDENDUM_2). Deriving the binary target, deriving
-the ordinal-period time column, and planting the B-2 leak are DEFINING the
-experiment, not cleaning data: every other column is carried through
-byte-for-byte as read from the raw file (missing-value '?' sentinels, the
-97%-missing 'weight' column, everything).
+and its ADDENDUM_1, ADDENDUM_2, and ADDENDUM_3). Deriving the binary target,
+deriving the ordinal-period time column, ordinal-encoding categorical
+features, and planting the B-2 leak are DEFINING the experiment, not
+cleaning data: every other column is carried through byte-for-byte as read
+from the raw file (missing-value '?' sentinels, the 97%-missing 'weight'
+column, everything -- '?' becomes an ordinary encoded category, not a
+cleaned-away value).
 
 Same raw file in -> same three CSVs out, every time. The only randomness
 is the B-2 label-noise flip, which is seeded (SEED) for reproducibility.
-The period_ordinal assignment is a pure function of encounter_id order --
-no randomness involved.
+The period_ordinal assignment and the ordinal encoding are both pure
+functions of the data's own values -- no randomness, no target information.
 
 Usage
 -----
@@ -23,6 +25,8 @@ Usage
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 from pathlib import Path
 
 import numpy as np
@@ -40,8 +44,9 @@ LEAK_FLIP_RATE: float = 0.05
 TARGET_SOURCE_COL = "readmitted"
 TARGET_COL = "readmitted_lt30"
 PLANTED_LEAK_COL = "planted_leak"
-CONTROL_COL = "weight"  # untouched-column check: must be byte-identical to raw
+CONTROL_COL = "weight"  # mess-preservation check: encoded, but category count must be invariant
 ENTITY_ORDER_COL = "encounter_id"  # real-order proxy: globally unique, increases with time
+ENTITY_ID_COL = "patient_nbr"  # contract's entity_id -- excluded from encoding
 
 # ── Ordinal-period time column ──────────────────────────────────────────────
 # Addendum 2 (TEST_B_PREREGISTRATION_ADDENDUM_2.md): raw encounter_id is
@@ -77,6 +82,30 @@ ENTITY_ORDER_COL = "encounter_id"  # real-order proxy: globally unique, increase
 N_PERIODS: int = 24
 PERIOD_COL = "period_ordinal"
 PERIOD_BASE_DATE = pd.Timestamp("2000-01-01")  # arbitrary anchor; ordinal, not calendar
+
+# ── Ordinal encoding of categorical features ────────────────────────────────
+# Addendum 3 (TEST_B_PREREGISTRATION_ADDENDUM_3.md): the first real B-1 run
+# crashed on evaluate_folds's df[feature_cols].to_numpy(dtype=float) cast,
+# because Diabetes-130 is mostly raw categorical text (race, gender, age
+# bucket, diag_1/2/3, ~20 drug-dosage columns). Addendum 3 pre-registered the
+# fix: ordinal/label encoding (sorted-unique -> 0..k-1, same semantics as
+# sklearn's OrdinalEncoder), not one-hot (diag_1/2/3 alone would explode into
+# 700+ columns each) and not target encoding (would inject target information
+# into the features, manufacturing leakage). The mapping uses ONLY each
+# column's own values -- no target, no randomness -- and every value present,
+# including the '?' sentinel, gets an ordinary code: nothing is cleaned or
+# imputed away.
+#
+# Role columns are excluded from encoding entirely (they aren't features):
+# entity_id, the derived period_ordinal (prediction_time AND
+# available_features_until), and the derived binary target. Everything else
+# -- including the raw 3-way 'readmitted' column that B-3 deliberately
+# leaves in as the undeclared blind-spot column -- is a feature and gets
+# encoded if it isn't already numeric.
+ROLE_COLS_EXCLUDED_FROM_ENCODING = {ENTITY_ID_COL, PERIOD_COL, TARGET_COL}
+ENCODING_MAP_JSON = Path(__file__).resolve().parent / "results" / "TEST_B_ENCODING_MAP.json"
+ENCODING_MAP_MD = Path(__file__).resolve().parent / "results" / "TEST_B_ENCODING_MAP.md"
+_INLINE_MAPPING_MAX_CATEGORIES = 15  # small enough to show in full in the .md summary
 
 
 def _derive_target(df: pd.DataFrame) -> pd.Series:
@@ -145,6 +174,126 @@ def _assign_period_ordinal(df: pd.DataFrame, n_periods: int, id_col: str) -> pd.
     return pd.Series([period_dates[b] for b in bucket], index=df.index, name=PERIOD_COL)
 
 
+def _is_non_numeric(series: pd.Series) -> bool:
+    """True if any value in `series` fails to coerce to a number.
+
+    Mirrors contract_checks._check_feature_columns_numeric's own definition
+    of "non-numeric" exactly, so a column this function says is fine is a
+    column that check will also say is fine.
+    """
+    coerced = pd.to_numeric(series, errors="coerce")
+    n_bad = int((coerced.isna() & ~series.isna()).sum())
+    return n_bad > 0
+
+
+def _build_ordinal_mappings(df: pd.DataFrame, exclude: set[str]) -> dict[str, dict[str, int]]:
+    """Compute a sorted-unique -> 0..k-1 mapping for every non-role,
+    non-numeric column in `df`. Computed once from the full column set and
+    reused everywhere, so the same category always gets the same code across
+    all three outputs. Uses only each column's own values -- no target, no
+    randomness -- so the mapping is deterministic and reproducible.
+    """
+    mappings: dict[str, dict[str, int]] = {}
+    for col in df.columns:
+        if col in exclude:
+            continue
+        if not _is_non_numeric(df[col]):
+            continue
+        uniques = sorted(df[col].unique())
+        mappings[col] = {v: i for i, v in enumerate(uniques)}
+    return mappings
+
+
+def _apply_ordinal_mappings(df: pd.DataFrame, mappings: dict[str, dict[str, int]]) -> pd.DataFrame:
+    """Apply precomputed mappings to every column of `df` that has one.
+    Columns not present in `df` (e.g. 'readmitted', absent from B-1/B-2) are
+    skipped. Encoded columns are stored as digit strings, matching this
+    script's all-string DataFrame convention.
+    """
+    df = df.copy()
+    for col, mapping in mappings.items():
+        if col not in df.columns:
+            continue
+        df[col] = df[col].map(mapping).astype(str)
+    return df
+
+
+def _mapping_hash(mapping: dict[str, int]) -> str:
+    """Short, stable hash of a column's mapping for cross-run verification."""
+    canonical = json.dumps(mapping, sort_keys=True, ensure_ascii=True)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
+
+
+def _write_encoding_map(mappings: dict[str, dict[str, int]],
+                         json_path: Path, md_path: Path) -> None:
+    """Write the complete, reproducible encoding record (Addendum 3's promise:
+    'the exact columns encoded and their code mappings will be written down').
+    JSON carries every mapping in full; the .md gives a fast human-readable
+    summary plus the full mapping inline for small columns.
+    """
+    json_path.parent.mkdir(parents=True, exist_ok=True)
+
+    payload = {
+        "method": "ordinal (sorted-unique -> 0..k-1, sklearn OrdinalEncoder semantics)",
+        "target_free": True,
+        "role_columns_excluded": sorted(ROLE_COLS_EXCLUDED_FROM_ENCODING),
+        "columns": {
+            col: {
+                "n_categories": len(mapping),
+                "hash": _mapping_hash(mapping),
+                "mapping": mapping,
+            }
+            for col, mapping in sorted(mappings.items())
+        },
+    }
+    json_path.write_text(json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=True) + "\n",
+                          encoding="utf-8")
+
+    lines = [
+        "# Test B ordinal-encoding map",
+        "",
+        "Generated by `zekan/benchmark/prepare_test_b.py` -- see "
+        "`TEST_B_PREREGISTRATION_ADDENDUM_3.md` for why (the crash it fixes) "
+        "and why ordinal encoding specifically (not one-hot, not target encoding).",
+        "",
+        "Method: sorted-unique -> 0..k-1 per column, using only that column's own "
+        "values. No target information, no randomness. `'?'` and every other raw "
+        "sentinel value is an ordinary category -- nothing is cleaned or imputed.",
+        "",
+        f"Role columns excluded from encoding: {', '.join(sorted(ROLE_COLS_EXCLUDED_FROM_ENCODING))}.",
+        "",
+        f"Full machine-readable mapping (every column, in full): `{json_path.name}`.",
+        "",
+        "## Summary",
+        "",
+        "| column | n_categories | hash |",
+        "|---|---|---|",
+    ]
+    for col, mapping in sorted(mappings.items()):
+        lines.append(f"| `{col}` | {len(mapping)} | `{_mapping_hash(mapping)}` |")
+
+    small = {c: m for c, m in sorted(mappings.items()) if len(m) <= _INLINE_MAPPING_MAX_CATEGORIES}
+    if small:
+        lines += ["", "## Full mapping for small columns (<= "
+                       f"{_INLINE_MAPPING_MAX_CATEGORIES} categories)", ""]
+        for col, mapping in small.items():
+            lines.append(f"**`{col}`** ({len(mapping)} categories):")
+            lines.append("")
+            for value, code in sorted(mapping.items(), key=lambda kv: kv[1]):
+                lines.append(f"- `{value!r}` -> `{code}`")
+            lines.append("")
+
+    large = [c for c, m in mappings.items() if len(m) > _INLINE_MAPPING_MAX_CATEGORIES]
+    if large:
+        lines += ["## Large columns (see JSON for full mapping)", ""]
+        for col in sorted(large):
+            lines.append(f"- `{col}`: {len(mappings[col])} categories, "
+                         f"hash `{_mapping_hash(mappings[col])}`")
+        lines.append("")
+
+    md_path.write_text("\n".join(lines), encoding="utf-8")
+
+
 def build_outputs(raw_df: pd.DataFrame) -> dict[str, pd.DataFrame]:
     target = _derive_target(raw_df)
     period_ordinal = _assign_period_ordinal(raw_df, N_PERIODS, ENTITY_ORDER_COL)
@@ -164,16 +313,28 @@ def build_outputs(raw_df: pd.DataFrame) -> dict[str, pd.DataFrame]:
     b3[TARGET_COL] = target
     b3[PERIOD_COL] = period_ordinal
 
+    # ── Ordinal-encode categorical features -- LAST transform before write ────
+    # Mapping is built once from raw_df (the superset of all real columns,
+    # including 'readmitted', before any output is column-subset/superset'd)
+    # so every output that shares a column shares the exact same code for the
+    # exact same category. Role columns (entity_id, period_ordinal, target)
+    # are excluded; planted_leak and encounter_id are already numeric-as-string
+    # and are left untouched by _is_non_numeric's own definition of "fine".
+    mappings = _build_ordinal_mappings(raw_df, ROLE_COLS_EXCLUDED_FROM_ENCODING)
+    b1 = _apply_ordinal_mappings(b1, mappings)
+    b2 = _apply_ordinal_mappings(b2, mappings)
+    b3 = _apply_ordinal_mappings(b3, mappings)
+
     return {
         "testB1_specificity.csv": b1,
         "testB2_sensitivity.csv": b2,
         "testB3_honest_unknown.csv": b3,
-    }, target, planted, n_flip, period_ordinal
+    }, target, planted, n_flip, period_ordinal, mappings
 
 
 def verify(raw_df: pd.DataFrame, outputs: dict[str, pd.DataFrame],
            target: pd.Series, planted: pd.Series, n_flip: int,
-           period_ordinal: pd.Series) -> None:
+           period_ordinal: pd.Series, mappings: dict[str, dict[str, int]]) -> None:
     n_raw = len(raw_df)
     print("=" * 90)
     print("VERIFICATION REPORT")
@@ -217,7 +378,24 @@ def verify(raw_df: pd.DataFrame, outputs: dict[str, pd.DataFrame],
     assert abs(pos_rate_raw - 0.1116) < 0.001, f"positive rate drifted: {pos_rate_raw}"
 
     raw_q = _question_mark_count(raw_df, CONTROL_COL)
-    print(f"\nControl column '{CONTROL_COL}' '?' count in RAW: {raw_q}")
+    print(f"\nControl column '{CONTROL_COL}' raw '?' count: {raw_q}")
+
+    # ── ordinal encoding checks ─────────────────────────────────────────────
+    print(f"\n--- ordinal encoding ---")
+    print(f"  columns encoded: {len(mappings)}")
+    print(f"  encoded column names: {sorted(mappings.keys())}")
+
+    raw_weight_nunique = int(raw_df[CONTROL_COL].nunique())
+    print(f"  '{CONTROL_COL}' raw distinct value count (incl. '?'): {raw_weight_nunique}")
+    assert CONTROL_COL in mappings, f"'{CONTROL_COL}' was not encoded -- unexpected"
+    assert "?" in mappings[CONTROL_COL], f"'?' sentinel missing from '{CONTROL_COL}' mapping"
+    assert len(mappings[CONTROL_COL]) == raw_weight_nunique, (
+        f"'{CONTROL_COL}' encoded category count {len(mappings[CONTROL_COL])} "
+        f"!= raw distinct count {raw_weight_nunique}"
+    )
+    print(f"  '{CONTROL_COL}' encoded category count: {len(mappings[CONTROL_COL])} "
+          f"(matches raw: {len(mappings[CONTROL_COL]) == raw_weight_nunique}); "
+          f"'?' present as an ordinary category: True")
 
     for name, df in outputs.items():
         print(f"\n--- {name} ---")
@@ -231,14 +409,25 @@ def verify(raw_df: pd.DataFrame, outputs: dict[str, pd.DataFrame],
         has_readmitted = TARGET_SOURCE_COL in df.columns
         print(f"  contains raw '{TARGET_SOURCE_COL}': {has_readmitted}")
 
-        q = _question_mark_count(df, CONTROL_COL)
-        print(f"  '{CONTROL_COL}' '?' count: {q} (matches raw: {q == raw_q})")
-        assert q == raw_q, f"{name}: '{CONTROL_COL}' '?' count {q} != raw {raw_q}"
+        out_weight_nunique = int(df[CONTROL_COL].nunique())
+        print(f"  '{CONTROL_COL}' encoded distinct code count: {out_weight_nunique} "
+              f"(matches raw distinct count: {out_weight_nunique == raw_weight_nunique})")
+        assert out_weight_nunique == raw_weight_nunique, (
+            f"{name}: '{CONTROL_COL}' encoded distinct count {out_weight_nunique} "
+            f"!= raw distinct count {raw_weight_nunique}"
+        )
 
         assert PERIOD_COL in df.columns, f"{name}: missing '{PERIOD_COL}'"
         out_n_bad = int(pd.to_datetime(df[PERIOD_COL], errors="coerce").isna().sum())
         print(f"  '{PERIOD_COL}' present, parse failures: {out_n_bad} (must be 0)")
         assert out_n_bad == 0, f"{name}: '{PERIOD_COL}' has {out_n_bad} parse failures"
+
+        non_numeric_cols = [
+            col for col in df.columns
+            if col not in ROLE_COLS_EXCLUDED_FROM_ENCODING and _is_non_numeric(df[col])
+        ]
+        print(f"  non-numeric feature columns remaining: {non_numeric_cols} (must be empty)")
+        assert not non_numeric_cols, f"{name}: still non-numeric after encoding: {non_numeric_cols}"
 
         print(f"  columns ({len(df.columns)}): {list(df.columns)}")
 
@@ -286,9 +475,16 @@ def main() -> None:
         n_periods=N_PERIODS,
     )
 
-    outputs, target, planted, n_flip, period_ordinal = build_outputs(raw_df)
+    outputs, target, planted, n_flip, period_ordinal, mappings = build_outputs(raw_df)
 
-    verify(raw_df, outputs, target, planted, n_flip, period_ordinal)
+    verify(raw_df, outputs, target, planted, n_flip, period_ordinal, mappings)
+
+    print("\n" + "=" * 90)
+    print("WRITING ENCODING MAP")
+    print("=" * 90)
+    _write_encoding_map(mappings, ENCODING_MAP_JSON, ENCODING_MAP_MD)
+    print(f"  wrote {ENCODING_MAP_JSON} ({len(mappings)} column(s) encoded)")
+    print(f"  wrote {ENCODING_MAP_MD}")
 
     print("\n" + "=" * 90)
     print("WRITING OUTPUTS")
