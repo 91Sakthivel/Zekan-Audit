@@ -219,11 +219,22 @@ def run_sweep(
     injector_seeds: list[int] | None = None,
     verbose: bool = True,
     stopping: str = "fixed_v1",
+    estimator: str = "rf",
 ) -> tuple[list[SweepRow], str]:
     """Run the sweep; returns (rows, confirmed_scheme).
 
     alpha_levels / injector_seeds default to the real-calibration ALPHA_LEVELS /
     INJECTOR_SEEDS; pass QUICK_ALPHA_LEVELS / QUICK_INJECTOR_SEEDS for a smoke run.
+
+    estimator
+        "rf" (default, unchanged): the sweep's own local _clf()
+        (RandomForestClassifier(n_estimators=30, random_state=0, n_jobs=1)),
+        exactly as before this parameter existed. "histgb": uses
+        zekan.severity.estimators._build_factory("histgb") -- the SAME locked
+        recipe (random_state=42, early_stopping=False) a real
+        `--estimator histgb` audit would get, not a separate sweep-tuned
+        variant, so this measures exactly what Phase C would be deciding
+        whether to default to.
 
     stopping
         "fixed_v1" (default, unchanged): draw exactly n_permutations.
@@ -233,6 +244,14 @@ def run_sweep(
     """
     alpha_levels = ALPHA_LEVELS if alpha_levels is None else alpha_levels
     injector_seeds = INJECTOR_SEEDS if injector_seeds is None else injector_seeds
+
+    if estimator == "rf":
+        clf_factory = _clf
+    elif estimator == "histgb":
+        from zekan.severity.estimators import _build_factory as _est_build_factory
+        clf_factory = _est_build_factory("histgb")
+    else:
+        raise ValueError(f"run_sweep: unsupported estimator {estimator!r}. Use 'rf' or 'histgb'.")
 
     scheme = _confirmed_scheme()
 
@@ -246,6 +265,7 @@ def run_sweep(
                 "  *** WARNING: expected 'spawn_v2' (F2a). This checkout is measuring "
                 f"under '{scheme}' -- results below are NOT the spawn_v2 calibration. ***"
             )
+        print(f"Estimator: {estimator}")
         print(f"Loading dataset: n_entities={N_ENTITIES}, seed={DATASET_SEED}")
 
     df_clean = make_clean_dataset(n_entities=N_ENTITIES, seed=DATASET_SEED)
@@ -290,7 +310,7 @@ def run_sweep(
                 df_leaked,
                 contract,
                 cfg,
-                model_factory=_clf,
+                model_factory=clf_factory,
                 n_permutations=n_permutations,
                 null_seed=seed,
                 n_jobs=n_jobs,
@@ -598,6 +618,12 @@ def main() -> None:
              "(stopping='sequential_v1') instead of a fixed n_permutations for both "
              "nulls. --n-permutations is ignored in this mode.",
     )
+    parser.add_argument(
+        "--estimator", type=str, default="rf", choices=["rf", "histgb"],
+        help="Tier 3: 'rf' (default, unchanged local _clf()) or 'histgb' (the same "
+             "locked recipe zekan.severity.estimators._build_factory('histgb') gives "
+             "a real --estimator histgb audit).",
+    )
     args = parser.parse_args()
 
     if args.quick:
@@ -618,6 +644,7 @@ def main() -> None:
         injector_seeds=injector_seeds,
         verbose=True,
         stopping=stopping,
+        estimator=args.estimator,
     )
     report(rows, scheme, quick=args.quick)
     write_csv(rows, args.output, scheme)
