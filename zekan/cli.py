@@ -23,7 +23,7 @@ def _run_audit_pipeline(
     dry_run: bool = False,
     json_mode: bool = False,
     model_factory=None,
-    estimator_identity: str = "default",
+    estimator_identity: Optional[str] = None,
     n_jobs: int = 1,
     stability: bool = False,
     seeds: int = 5,
@@ -42,6 +42,15 @@ def _run_audit_pipeline(
 
     from zekan.config.schema import load_config
     from zekan.contract.contract_checks import CheckStatus, validate_contract
+
+    # estimator_identity must record the CONCRETE estimator name, never the
+    # literal string "default" -- a provenance field that just says "default"
+    # is useless once the default itself can change (Tier 3 Phase C). Callers
+    # that don't pass --estimator leave this None; resolve it here, in one
+    # place, to whatever estimators.DEFAULT_ESTIMATOR_NAME currently is.
+    if estimator_identity is None:
+        from zekan.severity.estimators import DEFAULT_ESTIMATOR_NAME
+        estimator_identity = DEFAULT_ESTIMATOR_NAME
 
     # ── load config ───────────────────────────────────────────────────────────
     config_path = Path(config)
@@ -223,7 +232,9 @@ def audit(
     estimator: Optional[str] = typer.Option(
         None,
         "--estimator",
-        help="Classifier for leakage detection. Choices: extra_trees, gbm, logistic, rf. Default: rf (200-tree random forest).",
+        help="Classifier for leakage detection. Choices: extra_trees, gbm, histgb, logistic, rf. "
+             "Default: histgb (HistGradientBoosting, early stopping off for scale-independent "
+             "behavior). Use --estimator rf for the previous default.",
     ),
     manifest_path: Optional[str] = typer.Option(
         None,
@@ -273,7 +284,9 @@ def audit(
         from zekan.severity.estimators import _build_factory
         model_factory = _build_factory(estimator)
 
-    estimator_identity = estimator if estimator is not None else "default"
+    # None (not "default") when --estimator wasn't given: _run_audit_pipeline
+    # resolves None to the concrete DEFAULT_ESTIMATOR_NAME in one place.
+    estimator_identity = estimator
     effective_config = config or "zekan.yml"
     audit_report, provenance = _run_audit_pipeline(
         data, effective_config,
@@ -370,7 +383,9 @@ def report(
     estimator: Optional[str] = typer.Option(
         None,
         "--estimator",
-        help="Classifier for leakage detection. Choices: extra_trees, gbm, logistic, rf. Default: rf (200-tree random forest).",
+        help="Classifier for leakage detection. Choices: extra_trees, gbm, histgb, logistic, rf. "
+             "Default: histgb (HistGradientBoosting, early stopping off for scale-independent "
+             "behavior). Use --estimator rf for the previous default.",
     ),
 ) -> None:
     """Run the audit and write an HTML report to a file."""
@@ -440,6 +455,9 @@ def diff(
 
     if "null_scheme_notice" in result:
         typer.echo(f"  Note: {result['null_scheme_notice']}", err=json_output)
+
+    if "estimator_identity_notice" in result:
+        typer.echo(f"  Note: {result['estimator_identity_notice']}", err=json_output)
 
     if fail_on_regression and result["direction"] == "REGRESSED":
         raise typer.Exit(1)

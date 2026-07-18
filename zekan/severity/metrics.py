@@ -11,7 +11,6 @@ from typing import Any, Callable, Optional
 
 import numpy as np
 import pandas as pd
-from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import roc_auc_score
 
 from zekan.severity.splitters import FoldIndices, FoldMeta
@@ -46,7 +45,10 @@ class EvaluationResult:
 # ── Harness ───────────────────────────────────────────────────────────────────
 
 def _default_model_factory() -> Any:
-    return RandomForestClassifier(n_estimators=200, random_state=42)
+    # Tier 3 Phase C: default estimator is histgb (was rf). Single source of
+    # truth is estimators.DEFAULT_ESTIMATOR_NAME -- see its docstring.
+    from zekan.severity.estimators import DEFAULT_ESTIMATOR_NAME, _build_factory
+    return _build_factory(DEFAULT_ESTIMATOR_NAME)()
 
 
 def _feature_matrix(df: pd.DataFrame, feature_cols: list[str]) -> np.ndarray:

@@ -31,6 +31,19 @@ def _null_stopping(d: dict) -> str:
     return seed_block.get("null_stopping") or "fixed_v1"
 
 
+def _estimator_identity(d: dict) -> str:
+    """Extract the estimator identity from a provenance block.
+
+    estimator_identity has always been a required field on build_provenance
+    (unlike the additive null_scheme/null_stopping), so there is no historical
+    "field didn't exist yet" case to guess at -- only a missing provenance
+    block entirely (e.g. artifacts from commands that don't attach one) falls
+    back to "unknown".
+    """
+    provenance = d.get("provenance") or {}
+    return provenance.get("estimator_identity") or "unknown"
+
+
 def diff_reports(old: dict, new: dict) -> dict:
     """Compare two verdict_to_dict outputs and return a structured diff.
 
@@ -52,6 +65,12 @@ def diff_reports(old: dict, new: dict) -> dict:
     null_stopping (Tier 2 fixed_v1 vs sequential_v1): "null_stopping_notice" is
     set when they differ, since the two schemes draw a different number of
     permutations and are not directly comparable either.
+
+    estimator_identity is different from the two notices above: a different
+    estimator changes what fixable_leakage itself means (it's not just a
+    null-derived statistic), so when estimator_identity differs, this function
+    goes further than a notice -- fl_delta is forced to None and direction to
+    "UNVERIFIABLE_CHANGE", refusing the comparison rather than merely flagging it.
     """
     schema_old = old.get("schema_version")
     schema_new = new.get("schema_version")
@@ -129,5 +148,15 @@ def diff_reports(old: dict, new: dict) -> dict:
             "directly comparable across stopping schemes; fixable_leakage comparison "
             "is unaffected."
         )
+
+    estimator_old = _estimator_identity(old)
+    estimator_new = _estimator_identity(new)
+    if estimator_old != estimator_new:
+        result["estimator_identity_notice"] = (
+            f"estimator differs ({estimator_old} vs {estimator_new}): cross-estimator "
+            "leakage numbers are not comparable -- fl_delta/direction are refused, not computed."
+        )
+        result["fl_delta"] = None
+        result["direction"] = "UNVERIFIABLE_CHANGE"
 
     return result

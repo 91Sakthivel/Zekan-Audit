@@ -22,12 +22,17 @@ def _artifact(
     top_feature=None,
     schema_version: str = "1",
     null_scheme: str | None = None,
+    estimator_identity: str | None = None,
 ) -> dict:
     """Minimal schema-1 artifact dict for diff testing.
 
     null_scheme, when given, is nested under provenance.seed.null_scheme,
     mirroring build_provenance's real shape (F2a).  None (default) omits
     "provenance" entirely, matching artifacts predating F2a.
+
+    estimator_identity, when given, is set at provenance.estimator_identity
+    (top-level of the provenance dict, matching build_provenance's real shape)
+    -- Tier 3 Phase C.
     """
     d: dict = {
         "schema_version": schema_version,
@@ -40,6 +45,8 @@ def _artifact(
     }
     if null_scheme is not None:
         d["provenance"] = {"seed": {"null_scheme": null_scheme}}
+    if estimator_identity is not None:
+        d.setdefault("provenance", {})["estimator_identity"] = estimator_identity
     return d
 
 
@@ -275,6 +282,63 @@ def test_cli_diff_fail_on_regression_still_fires_on_real_regression_across_schem
     ])
 
     assert result.exit_code == 1
+
+
+# ── Tier 3 Phase C: estimator-identity guard ─────────────────────────────────
+# Unlike null_scheme/null_stopping (which only affect null-derived stats),
+# a different estimator changes what fixable_leakage itself means -- so this
+# guard goes further than a notice: it also refuses fl_delta/direction.
+
+def test_estimator_identity_differs_sets_notice_and_refuses_delta():
+    old = _artifact(0.2100, verdict="FAIL", estimator_identity="rf")
+    new = _artifact(0.0400, verdict="PASS", estimator_identity="histgb")
+    d = diff_reports(old, new)
+    assert "estimator_identity_notice" in d
+    assert "rf" in d["estimator_identity_notice"]
+    assert "histgb" in d["estimator_identity_notice"]
+    assert "not comparable" in d["estimator_identity_notice"]
+    assert d["fl_delta"] is None
+    assert d["direction"] == "UNVERIFIABLE_CHANGE"
+
+
+def test_estimator_identity_same_no_notice():
+    old = _artifact(0.0400, estimator_identity="histgb")
+    new = _artifact(0.0300, estimator_identity="histgb")
+    d = diff_reports(old, new)
+    assert "estimator_identity_notice" not in d
+    assert d["direction"] == "IMPROVED"
+    assert d["fl_delta"] == pytest.approx(-0.0100)
+
+
+def test_estimator_identity_missing_both_treated_as_unknown_no_notice():
+    """Two artifacts with no provenance at all -> both default to "unknown"
+    -> identities match -> no notice."""
+    old = _artifact(0.0400)
+    new = _artifact(0.0300)
+    d = diff_reports(old, new)
+    assert "estimator_identity_notice" not in d
+
+
+def test_estimator_identity_missing_on_one_side_sets_notice():
+    old = _artifact(0.0400)  # no provenance at all -> "unknown"
+    new = _artifact(0.0300, estimator_identity="histgb")
+    d = diff_reports(old, new)
+    assert "estimator_identity_notice" in d
+    assert "unknown" in d["estimator_identity_notice"]
+    assert "histgb" in d["estimator_identity_notice"]
+
+
+def test_cli_diff_prints_estimator_identity_notice(tmp_path):
+    a = tmp_path / "old.json"
+    b = tmp_path / "new.json"
+    _write(a, _artifact(0.0400, estimator_identity="rf"))
+    _write(b, _artifact(0.0300, estimator_identity="histgb"))
+
+    result = runner.invoke(app, ["diff", "--old", str(a), "--new", str(b)])
+
+    assert result.exit_code == 0, result.output
+    assert "estimator differs" in result.output
+    assert "not comparable" in result.output
 
 
 # ── CLI tests ─────────────────────────────────────────────────────────────────

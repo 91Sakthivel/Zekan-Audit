@@ -23,7 +23,6 @@ from typing import Any, Callable, Optional
 
 import numpy as np
 import pandas as pd
-from sklearn.ensemble import RandomForestClassifier
 
 from zekan.contract.prediction_contract import PredictionContract
 from zekan.severity.metrics import evaluate_folds
@@ -79,7 +78,10 @@ class AblationSummary:
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _default_factory() -> Any:
-    return RandomForestClassifier(n_estimators=100, random_state=42, n_jobs=1)
+    # Tier 3 Phase C: default estimator is histgb (was rf). Single source of
+    # truth is estimators.DEFAULT_ESTIMATOR_NAME -- see its docstring.
+    from zekan.severity.estimators import DEFAULT_ESTIMATOR_NAME, _build_factory
+    return _build_factory(DEFAULT_ESTIMATOR_NAME)()
 
 
 def _univariate_auc(

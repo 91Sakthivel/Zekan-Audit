@@ -98,7 +98,8 @@ def run_audit(
         ZekanConfig with SplitPolicy.
     model_factory
         Callable returning a fresh sklearn-compatible classifier.  When None the
-        engine uses its internal default (RandomForestClassifier).
+        engine uses its internal default (see estimators.DEFAULT_ESTIMATOR_NAME;
+        histgb as of Tier 3 Phase C).
     n_permutations
         Permutation null draws.  Default 100 (the recommended minimum for a
         defensible detection verdict).  Pass 0 to skip the null — detection will

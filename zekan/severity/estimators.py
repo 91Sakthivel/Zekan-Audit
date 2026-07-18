@@ -21,6 +21,15 @@ _ESTIMATOR_ALLOWLIST: dict[str, type] = {
     "logistic": LogisticRegression,
 }
 
+# Single source of truth for "what the engine falls back to when no
+# --estimator is given" (Tier 3 Phase C). metrics._default_model_factory and
+# ablation._default_factory both build their fallback via
+# _build_factory(DEFAULT_ESTIMATOR_NAME), and cli.py's estimator_identity
+# provenance field uses this name too, so nothing has to be kept in sync by
+# hand across three files -- reverting the default is a one-line change here.
+# "rf" remains fully available via --estimator rf; only the fallback changed.
+DEFAULT_ESTIMATOR_NAME: str = "histgb"
+
 
 def _build_factory(name: str) -> Callable[[], Any]:
     """Return a zero-arg factory for the named estimator, seed 42 baked in.
