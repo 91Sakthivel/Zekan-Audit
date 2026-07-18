@@ -133,6 +133,22 @@ class EngineDetection(BaseModel):
     See VerdictReport.fold_ci for the full CI computation.
     """
     interpretation: str
+    null_stopping: Optional[str] = None
+    """Tier 2: "fixed_v1" (draw exactly n_permutations, unchanged pre-Tier-2
+    behavior) or "sequential_v1" (Besag-Clifford + decision-stability adaptive
+    stopping). None when the null did not run at all. Changes HOW MANY
+    permutations were drawn, never this block's detected/p_value/nsl logic."""
+    n_drawn: Optional[int] = None
+    """Within-entity null: actual permutation draws used (excludes skipped
+    draws) -- identical meaning under either stopping scheme."""
+    n_drawn_across: Optional[int] = None
+    """Across-entity null: actual permutation draws used. None when the
+    across-entity null did not run (no-op guard: <2 entities)."""
+    stopped_early: Optional[bool] = None
+    """True iff the within-entity null (sequential_v1 only) stopped before
+    reaching the locked ceiling. False under fixed_v1. None when not run."""
+    stopped_early_across: Optional[bool] = None
+    """Same as stopped_early, for the across-entity null."""
 
 
 class MeasuredDamage(BaseModel):
@@ -687,6 +703,8 @@ def build_verdict(
             "uncertainty at this sample size; detection gate did not fire."
         )
 
+    _null_ran = result.p_value is not None
+    _across_ran = result.p_value_across is not None
     detection = EngineDetection(
         detected=detected,
         p_value=result.p_value,
@@ -695,6 +713,11 @@ def build_verdict(
         confidence=fold_ci.confidence_tier,
         detection_channel=detection_channel,
         interpretation=det_interp,
+        null_stopping=result.null_stopping if _null_ran else None,
+        n_drawn=result.n_permutations_run if _null_ran else None,
+        n_drawn_across=result.n_permutations_across if _across_ran else None,
+        stopped_early=result.null_stopped_early if _null_ran else None,
+        stopped_early_across=result.null_stopped_early_across if _across_ran else None,
     )
 
     # ── measured_damage block ─────────────────────────────────────────────────

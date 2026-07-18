@@ -183,9 +183,10 @@ def test_build_provenance_keys(simple_provenance):
 
 
 def test_build_provenance_seed_subkeys(simple_provenance):
-    # re-baselined: F2a adds null_scheme (additive) to the seed sub-dict
+    # re-baselined: F2a adds null_scheme, Tier 2 adds null_stopping (both
+    # additive) to the seed sub-dict.
     assert set(simple_provenance["seed"]) == {
-        "null_seed", "estimator_random_state", "null_scheme",
+        "null_seed", "estimator_random_state", "null_scheme", "null_stopping",
     }
 
 

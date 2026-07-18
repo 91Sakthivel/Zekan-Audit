@@ -20,6 +20,17 @@ def _null_scheme(d: dict) -> str:
     return seed_block.get("null_scheme") or "serial_v1"
 
 
+def _null_stopping(d: dict) -> str:
+    """Extract the permutation-null stopping scheme from a provenance block.
+
+    JSON produced before Tier 2 carries no null_stopping at all — that absence
+    is treated as the original "fixed_v1" scheme, never guessed to match the
+    other side. Mirrors _null_scheme's exact pattern.
+    """
+    seed_block = (d.get("provenance") or {}).get("seed") or {}
+    return seed_block.get("null_stopping") or "fixed_v1"
+
+
 def diff_reports(old: dict, new: dict) -> dict:
     """Compare two verdict_to_dict outputs and return a structured diff.
 
@@ -37,7 +48,10 @@ def diff_reports(old: dict, new: dict) -> dict:
     carries a different null_scheme (F2a spawn_v2 vs the retired serial_v1, or
     either side missing null_scheme entirely), "null_scheme_notice" is set so
     callers can surface that null statistics are not comparable across schemes
-    even if a future field starts comparing them.
+    even if a future field starts comparing them.  Same pattern for
+    null_stopping (Tier 2 fixed_v1 vs sequential_v1): "null_stopping_notice" is
+    set when they differ, since the two schemes draw a different number of
+    permutations and are not directly comparable either.
     """
     schema_old = old.get("schema_version")
     schema_new = new.get("schema_version")
@@ -104,6 +118,16 @@ def diff_reports(old: dict, new: dict) -> dict:
         result["null_scheme_notice"] = (
             f"null scheme differs ({scheme_old} vs {scheme_new}): null statistics "
             "are not comparable across schemes; fixable_leakage comparison is unaffected."
+        )
+
+    stopping_old = _null_stopping(old)
+    stopping_new = _null_stopping(new)
+    if stopping_old != stopping_new:
+        result["null_stopping_notice"] = (
+            f"null stopping scheme differs ({stopping_old} vs {stopping_new}): "
+            "the number of permutations drawn may differ; null statistics are not "
+            "directly comparable across stopping schemes; fixable_leakage comparison "
+            "is unaffected."
         )
 
     return result

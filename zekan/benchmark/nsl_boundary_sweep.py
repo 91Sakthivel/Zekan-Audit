@@ -202,6 +202,13 @@ class SweepRow:
     n_permutations_across: int
     detection_channel: str   # within_entity / across_entity / both / "" (OR-combined, build_verdict)
 
+    # Tier 2 additions -- sequential/adaptive stopping (additive; defaults keep
+    # every pre-Tier-2 call to SweepRow(...) unchanged).
+    n_permutations: int = 0        # within-entity draws actually used
+    stopped_early: bool = False    # within-entity null stopped before _SEQ_N_MAX
+    stopped_early_across: bool = False
+    stopping: str = "fixed_v1"     # "fixed_v1" or "sequential_v1"
+
 
 # ---- Sweep ------------------------------------------------------------------
 
@@ -211,11 +218,18 @@ def run_sweep(
     alpha_levels: list[float] | None = None,
     injector_seeds: list[int] | None = None,
     verbose: bool = True,
+    stopping: str = "fixed_v1",
 ) -> tuple[list[SweepRow], str]:
     """Run the sweep; returns (rows, confirmed_scheme).
 
     alpha_levels / injector_seeds default to the real-calibration ALPHA_LEVELS /
     INJECTOR_SEEDS; pass QUICK_ALPHA_LEVELS / QUICK_INJECTOR_SEEDS for a smoke run.
+
+    stopping
+        "fixed_v1" (default, unchanged): draw exactly n_permutations.
+        "sequential_v1" (Tier 2): Besag-Clifford + decision-stability adaptive
+        stopping (see null_baseline.estimate_fixable_leakage_null). n_permutations
+        is ignored for both nulls in this mode.
     """
     alpha_levels = ALPHA_LEVELS if alpha_levels is None else alpha_levels
     injector_seeds = INJECTOR_SEEDS if injector_seeds is None else injector_seeds
@@ -280,6 +294,7 @@ def run_sweep(
                 n_permutations=n_permutations,
                 null_seed=seed,
                 n_jobs=n_jobs,
+                null_stopping=stopping,
             )
 
             if result.status == "unavailable":
@@ -326,6 +341,10 @@ def run_sweep(
                 null_99th_across=null_q99_across,
                 n_permutations_across=n_perm_across,
                 detection_channel=detection_channel,
+                n_permutations=result.n_permutations_run,
+                stopped_early=result.null_stopped_early,
+                stopped_early_across=result.null_stopped_early_across,
+                stopping=result.null_stopping,
             )
             rows.append(row)
 
@@ -573,6 +592,12 @@ def main() -> None:
         "--output", type=str, default=DEFAULT_OUTPUT_PATH,
         help=f"CSV output path (default: {DEFAULT_OUTPUT_PATH}).",
     )
+    parser.add_argument(
+        "--sequential", action="store_true",
+        help="Tier 2: use Besag-Clifford + decision-stability adaptive stopping "
+             "(stopping='sequential_v1') instead of a fixed n_permutations for both "
+             "nulls. --n-permutations is ignored in this mode.",
+    )
     args = parser.parse_args()
 
     if args.quick:
@@ -584,12 +609,15 @@ def main() -> None:
         injector_seeds = INJECTOR_SEEDS
         n_permutations = args.n_permutations if args.n_permutations is not None else N_PERMUTATIONS
 
+    stopping = "sequential_v1" if args.sequential else "fixed_v1"
+
     rows, scheme = run_sweep(
         n_permutations=n_permutations,
         n_jobs=args.jobs,
         alpha_levels=alpha_levels,
         injector_seeds=injector_seeds,
         verbose=True,
+        stopping=stopping,
     )
     report(rows, scheme, quick=args.quick)
     write_csv(rows, args.output, scheme)

@@ -84,6 +84,7 @@ def run_audit(
     fail_floor: float = _DEFAULT_FAIL_FLOOR,
     policy_profile: str = "default_auc",
     n_jobs: int = 1,
+    null_stopping: str = "fixed_v1",
 ) -> VerdictReport:
     """Chain run_severity_analysis → build_verdict, returning all three verdict blocks.
 
@@ -101,7 +102,8 @@ def run_audit(
     n_permutations
         Permutation null draws.  Default 100 (the recommended minimum for a
         defensible detection verdict).  Pass 0 to skip the null — detection will
-        be False and high fl will appear as UNCONFIRMED_HIGH_DAMAGE.
+        be False and high fl will appear as UNCONFIRMED_HIGH_DAMAGE. Ignored when
+        null_stopping="sequential_v1" (see below).
     null_seed
         RNG seed for the permutation null.
     warn_floor
@@ -110,6 +112,10 @@ def run_audit(
         fl threshold for FAIL in policy_decision; default 0.15.
     policy_profile
         Label for the policy block; use "default_auc" or a domain string.
+    null_stopping
+        "fixed_v1" (default) or "sequential_v1" (Tier 2 Besag-Clifford +
+        decision-stability adaptive stopping) — see
+        engine.run_severity_analysis / null_baseline.estimate_fixable_leakage_null.
 
     Returns
     -------
@@ -128,6 +134,7 @@ def run_audit(
         null_seed=null_seed,
         ablation_warn_floor=warn_floor,
         n_jobs=n_jobs,
+        null_stopping=null_stopping,
     )
     report = build_verdict(
         severity_result,

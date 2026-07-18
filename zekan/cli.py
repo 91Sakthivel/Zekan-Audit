@@ -27,6 +27,7 @@ def _run_audit_pipeline(
     n_jobs: int = 1,
     stability: bool = False,
     seeds: int = 5,
+    sequential_null: bool = False,
 ) -> tuple:  # (VerdictReport | None, provenance_dict | None)
     """Load config+data, validate contract, run audit. Returns (None, None) on early stop.
 
@@ -151,7 +152,11 @@ def _run_audit_pipeline(
         read_estimator_random_state,
     )
 
-    _report = run_audit(df, cfg.contract, cfg, model_factory=model_factory, n_jobs=n_jobs)
+    _null_stopping_mode = "sequential_v1" if sequential_null else "fixed_v1"
+    _report = run_audit(
+        df, cfg.contract, cfg, model_factory=model_factory, n_jobs=n_jobs,
+        null_stopping=_null_stopping_mode,
+    )
 
     # ── seed-stability check (opt-in) ─────────────────────────────────────────
     if stability:
@@ -167,6 +172,7 @@ def _run_audit_pipeline(
                 model_factory=model_factory,
                 n_jobs=n_jobs,
                 null_seed=_seed_i,
+                null_stopping=_null_stopping_mode,
             )
             _verdicts.append(_r_i.policy_decision.verdict)
         _report = _apply_seed_stability(_report, _verdicts)
@@ -188,6 +194,7 @@ def _run_audit_pipeline(
         estimator_identity=estimator_identity,
         estimator_random_state=read_estimator_random_state(model_factory),
         null_scheme="spawn_v2",
+        null_stopping=_null_stopping_mode,
     )
     return _report, _provenance
 
@@ -239,6 +246,13 @@ def audit(
         "--seeds",
         help="Number of null seeds for --stability (must be >= 2).",
     ),
+    sequential_null: bool = typer.Option(
+        False,
+        "--sequential-null",
+        help="Tier 2: use Besag-Clifford + decision-stability adaptive stopping for "
+             "both permutation nulls instead of a fixed permutation count. Changes how "
+             "many permutations are drawn, never the verdict logic.",
+    ),
 ) -> None:
     """Audit a model for data-leakage and trust issues."""
     import sys
@@ -270,6 +284,7 @@ def audit(
         n_jobs=jobs,
         stability=stability,
         seeds=seeds,
+        sequential_null=sequential_null,
     )
     if audit_report is None:
         if fail_if_inflation_greater_than is not None and not dry_run:

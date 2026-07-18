@@ -86,6 +86,7 @@ def build_provenance(
     estimator_identity: str,
     estimator_random_state: Optional[int],
     null_scheme: str = "spawn_v2",
+    null_stopping: str = "fixed_v1",
 ) -> dict:
     """Return a deterministic provenance dict — NO timestamp.
 
@@ -94,6 +95,13 @@ def build_provenance(
         (SeedSequence-based, n_jobs-independent) scheme.  Additive field — JSON
         produced before F2a has no null_scheme key at all; `zekan diff` treats
         that absence as the retired "serial_v1" scheme.
+    null_stopping
+        The permutation-null stopping scheme (Tier 2).  "fixed_v1" is the
+        original (draw exactly n_permutations) scheme; "sequential_v1" is the
+        Besag-Clifford + decision-stability adaptive scheme.  Additive field —
+        JSON produced before Tier 2 has no null_stopping key at all; `zekan
+        diff` treats that absence as "fixed_v1" (never guessed to match the
+        other side).
     """
     return {
         "contract_sha256": contract_hash,
@@ -103,6 +111,7 @@ def build_provenance(
             "estimator_random_state": estimator_random_state,
             "null_seed": null_seed,
             "null_scheme": null_scheme,
+            "null_stopping": null_stopping,
         },
         "versions": versions,
     }

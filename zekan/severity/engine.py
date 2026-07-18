@@ -88,6 +88,13 @@ class SeverityResult:
     p_value_across: Optional[float] = None
     nsl_across: Optional[float] = None
     n_permutations_across: int = 0                # 0 when the across-entity null was not run
+    # Tier 2 (sequential/adaptive stopping) — additive; "fixed_v1" + stopped_early=False
+    # for every pre-Tier-2 caller (the default run_severity_analysis(null_stopping=...)
+    # value). n_permutations_run/n_permutations_across above already ARE n_drawn under
+    # either stopping scheme -- no separate n_drawn field is needed.
+    null_stopping: str = "fixed_v1"               # "fixed_v1" or "sequential_v1"
+    null_stopped_early: bool = False              # within-entity null stopped before _SEQ_N_MAX
+    null_stopped_early_across: bool = False       # across-entity null stopped before _SEQ_N_MAX
     feature_attribution: Optional[Any] = None     # AblationSummary when ablation ran; None otherwise
     folds: list = field(default_factory=list)     # temporal FoldIndices used for B/C eval; internal only
 
@@ -157,6 +164,7 @@ def run_severity_analysis(
     null_seed: int = 0,
     ablation_warn_floor: Optional[float] = None,
     n_jobs: int = 1,
+    null_stopping: str = "fixed_v1",
 ) -> SeverityResult:
     """Run the A/B/C performance decomposition and return a SeverityResult.
 
@@ -174,7 +182,8 @@ def run_severity_analysis(
         within each entity) that a within-entity permutation cannot see.  It is
         additive — the within-entity fields and calibration are unaffected — and is
         NOT RUN (fields stay None) when the dataset has fewer than 2 entities.
-        Default 0 skips both nulls (backward-compatible).
+        Default 0 skips both nulls (backward-compatible). IGNORED for both nulls
+        when null_stopping="sequential_v1" -- see null_stopping below.
     null_seed
         RNG seed for the permutation null.  Different seeds give convergent null_95th
         at n_permutations >= 100.  Under spawn_v2 (F2a), seeds the permutation's
@@ -184,6 +193,14 @@ def run_severity_analysis(
         (loky backend via joblib).  Default 1 = serial.  Both nulls use spawn_v2
         seeding regardless of n_jobs, so null_samples/null_iqr/p_value/nsl are
         byte-identical whether n_jobs=1 or n_jobs>1 — only wall-clock time changes.
+    null_stopping
+        "fixed_v1" (default): both nulls draw exactly n_permutations, unchanged
+        from pre-Tier-2 behavior. "sequential_v1" (Tier 2): both nulls use the
+        Besag-Clifford + decision-stability adaptive stopping rule instead (see
+        null_baseline.estimate_fixable_leakage_null's docstring) -- changes HOW
+        MANY permutations are drawn, never the verdict logic itself. Result
+        surfaces as null_stopping / null_stopped_early / null_stopped_early_across
+        on the returned SeverityResult.
     """
     policy = config.split_policy
 
@@ -350,6 +367,7 @@ def run_severity_analysis(
     p_value: Optional[float] = None
     nsl: Optional[float] = None
     n_permutations_run = 0
+    null_stopped_early = False
 
     # Across-entity null (spec 1) — additive second channel; stays None unless it
     # actually runs (see the no-op guard in estimate_fixable_leakage_null).
@@ -360,6 +378,7 @@ def run_severity_analysis(
     p_value_across: Optional[float] = None
     nsl_across: Optional[float] = None
     n_permutations_across = 0
+    null_stopped_early_across = False
 
     if n_permutations > 0:
         from zekan.severity.null_baseline import estimate_fixable_leakage_null
@@ -372,6 +391,7 @@ def run_severity_analysis(
             seed=null_seed,
             method="within_entity",
             n_jobs=n_jobs,
+            stopping=null_stopping,
         )
         null_95th = _null.null_95th
         null_99th = _null.null_99th
@@ -379,6 +399,7 @@ def run_severity_analysis(
         null_iqr = _null.null_iqr
         p_value = _null.p_value
         n_permutations_run = _null.n_permutations
+        null_stopped_early = _null.stopped_early
         # NSL denominator: IQR of null distribution (stable at N=100; the
         # 99th-percentile−median spread near the tail is noisy at N=100 because
         # q99 ≈ max, whose sampling variance dominates).
@@ -402,6 +423,7 @@ def run_severity_analysis(
             seed=null_seed,
             method="across_entity",
             n_jobs=n_jobs,
+            stopping=null_stopping,
         )
         if _null_across.n_permutations > 0:
             null_95th_across = _null_across.null_95th
@@ -410,6 +432,7 @@ def run_severity_analysis(
             null_iqr_across = _null_across.null_iqr
             p_value_across = _null_across.p_value
             n_permutations_across = _null_across.n_permutations
+            null_stopped_early_across = _null_across.stopped_early
             _null_unit_across = max(_null_across.null_iqr, _NSL_EPS)
             nsl_across = (fixable_leakage - _null_across.null_99th) / _null_unit_across
 
@@ -438,6 +461,9 @@ def run_severity_analysis(
         p_value_across=p_value_across,
         nsl_across=nsl_across,
         n_permutations_across=n_permutations_across,
+        null_stopping=null_stopping,
+        null_stopped_early=null_stopped_early,
+        null_stopped_early_across=null_stopped_early_across,
         feature_attribution=feature_attribution,
         folds=temp_folds,
     )

@@ -87,12 +87,94 @@ from typing import Any, Callable, Optional
 
 import numpy as np
 import pandas as pd
+from scipy.stats import norm as _scipy_norm
 from sklearn.metrics import roc_auc_score
 
 from zekan.config.schema import ZekanConfig
 from zekan.contract.prediction_contract import PredictionContract
 from zekan.severity.metrics import _feature_matrix, evaluate_folds
 from zekan.severity.splitters import temporal_expanding_folds
+
+
+# ── Tier 2: sequential/adaptive permutation stopping (Besag-Clifford style) ───
+# Parameters are pre-registered and locked -- not caller-adjustable, matching
+# the "spec is locked" discipline used for the NSL ladder thresholds in
+# engine.py. Mirrors engine._NULL_ALPHA (0.01) as a local constant rather than
+# importing it, to avoid a circular import (engine.py imports FROM this
+# module) -- the same pattern already used for the feature-exclusion set in
+# estimate_fixable_leakage_null below.
+_SEQ_H: int = 10                    # Besag-Clifford exceedance-count stopping threshold
+_SEQ_N_MIN: int = 30                # minimum draws before any early-stop check runs
+_SEQ_N_MAX: int = 500               # hard ceiling; spawn(N_MAX) up front (see module docstring)
+_SEQ_ALPHA: float = 0.01            # mirrors engine._NULL_ALPHA; only gates the internal
+                                     # decision-stability check below, not the final verdict
+_SEQ_IQR_CONFIDENCE: float = 0.99   # conservative (wide) two-sided CI for the IQR-stability check
+
+
+def _quantile_order_stat_indices(n: int, p: float, confidence: float) -> tuple[int, int]:
+    """Distribution-free (normal-approximation) two-sided CI for the p-th
+    population quantile, expressed as 0-indexed order-statistic bounds in a
+    sorted sample of size n.
+
+    Standard nonparametric method (e.g. Conover, "Practical Nonparametric
+    Statistics"): the index of the p-th sample quantile is asymptotically
+    Normal(n*p, n*p*(1-p)) under the binomial count of observations below the
+    true quantile. Deterministic given n -- no resampling, no extra RNG state,
+    which matters here because the sequential stopping rule must not add a
+    new randomness source on top of the permutation draws themselves.
+    """
+    z = float(_scipy_norm.ppf((1 + confidence) / 2))
+    se = float(np.sqrt(n * p * (1 - p)))
+    lo = int(np.floor(n * p - z * se))
+    hi = int(np.ceil(n * p + z * se))
+    lo = max(0, min(lo, n - 1))
+    hi = max(0, min(hi, n - 1))
+    return lo, hi
+
+
+def _conservative_iqr_bound(samples: np.ndarray, confidence: float) -> tuple[float, float]:
+    """Conservative (widest plausible) range for the population IQR given
+    `samples`, using order-statistic CIs for Q25 and Q75 independently.
+
+    iqr_low  = (low end of Q75's CI)  - (high end of Q25's CI)  -- smallest plausible IQR
+    iqr_high = (high end of Q75's CI) - (low end of Q25's CI)   -- largest plausible IQR
+
+    This is intentionally conservative (wider than either quantile's own CI
+    alone): it does not assume Q25 and Q75's estimation errors are correlated
+    or cancel, so [iqr_low, iqr_high] is a safe (if loose) bound on where the
+    true IQR could plausibly sit given only `samples`.
+    """
+    n = len(samples)
+    sorted_samples = np.sort(samples)
+    q25_lo, q25_hi = _quantile_order_stat_indices(n, 0.25, confidence)
+    q75_lo, q75_hi = _quantile_order_stat_indices(n, 0.75, confidence)
+    iqr_low = float(sorted_samples[q75_lo] - sorted_samples[q25_hi])
+    iqr_high = float(sorted_samples[q75_hi] - sorted_samples[q25_lo])
+    return iqr_low, iqr_high
+
+
+def _nsl_decision_stable(
+    observed_fixable_leakage: float,
+    null_99th: float,
+    iqr_low: float,
+    iqr_high: float,
+    nsl_eps: float = 1e-4,
+) -> bool:
+    """True iff the NSL>=1.0 vs <1.0 ladder-boundary decision is unchanged
+    across the conservative [iqr_low, iqr_high] bound on the null IQR.
+
+    Scope, stated plainly: this checks stability ONLY with respect to
+    null_iqr's sampling uncertainty (per the pre-registered spec). null_99th
+    is held at its current point estimate throughout -- it is not separately
+    bounded here. NSL = (observed - null_99th) / max(null_iqr, nsl_eps); since
+    null_iqr is in the denominator, the smallest plausible IQR gives the
+    largest-magnitude NSL and the largest plausible IQR gives the
+    smallest-magnitude NSL, so checking both ends of the bound is sufficient
+    to establish stability of the >=1.0 boundary specifically.
+    """
+    nsl_worst = (observed_fixable_leakage - null_99th) / max(iqr_low, nsl_eps)
+    nsl_best = (observed_fixable_leakage - null_99th) / max(iqr_high, nsl_eps)
+    return (nsl_worst >= 1.0) == (nsl_best >= 1.0)
 
 
 # ── Result ────────────────────────────────────────────────────────────────────
@@ -113,6 +195,9 @@ class NullResult:
     elapsed_seconds: float = 0.0
     scheme: str = "spawn_v2"     # seeding scheme: "spawn_v2" (within/across_entity) or
                                   # "serial_v1" (target_within_period, unchanged)
+    stopping: str = "fixed_v1"   # "fixed_v1" (draw exactly n_permutations, unchanged default)
+                                  # or "sequential_v1" (Tier 2: Besag-Clifford + decision-stability)
+    stopped_early: bool = False  # True iff sequential_v1 stopped before _SEQ_N_MAX
 
 
 # ── Permutation strategies ────────────────────────────────────────────────────
@@ -379,6 +464,7 @@ def estimate_fixable_leakage_null(
     method: str = "within_entity",
     verbose: bool = False,
     n_jobs: int = 1,
+    stopping: str = "fixed_v1",
 ) -> NullResult:
     """Estimate the permutation null distribution for fixable_leakage.
 
@@ -388,9 +474,11 @@ def estimate_fixable_leakage_null(
         The fixable_leakage value from the unmodified engine run.
         Used only to compute the p-value; does not affect null sampling.
     n_permutations
-        Number of permutation draws.  100 gives stable 95th percentile on the
-        benchmark DGP (two batches agree within ~0.003).  Increase to 200 for
-        higher resolution.
+        Number of permutation draws when stopping="fixed_v1" (the default).
+        100 gives stable 95th percentile on the benchmark DGP (two batches
+        agree within ~0.003). Increase to 200 for higher resolution. IGNORED
+        when stopping="sequential_v1" -- that mode uses the pre-registered,
+        locked ceiling _SEQ_N_MAX (500) instead; see `stopping` below.
     seed
         RNG seed for reproducibility.  Different seeds give different null samples
         but convergent 95th percentile at n=100.  For within_entity/across_entity
@@ -410,6 +498,41 @@ def estimate_fixable_leakage_null(
         via joblib).  Default 1 = serial, using the SAME spawn_v2 child-stream
         scheme as the parallel path — null_samples is byte-identical regardless of
         n_jobs.  Has no effect on target_within_period (always serial).
+    stopping
+        "fixed_v1" (default): draw exactly n_permutations, unchanged from the
+            original behavior -- byte-identical to every pre-Tier-2 call.
+        "sequential_v1" (Tier 2, within_entity/across_entity only): draw in
+            batches (batch size = n_jobs when n_jobs > 1, else 1) up to
+            _SEQ_N_MAX=500, checking after each batch (once at least
+            _SEQ_N_MIN=30 draws have landed) whether to stop early:
+              - Besag-Clifford exact rule: stop as soon as _SEQ_H=10 draws
+                are >= observed_fixable_leakage. p_value = h/n_drawn exactly
+                (this is what makes it exact, not an approximation: the
+                stopping rule itself waited for the h-th success, so h/n is
+                an unbiased estimator under that specific sampling scheme).
+                Since _SEQ_H/_SEQ_N_MAX = 10/500 = 0.02 > _SEQ_ALPHA=0.01,
+                reaching h ANYWHERE in [30, 500] already guarantees the final
+                p_value cannot be significant at alpha=0.01 -- the NSL ladder
+                is never entered in this branch, so no further check is
+                needed before stopping.
+              - Decision-stability rule (only checked when running p already
+                looks significant, i.e. count < h but (count+1)/(n+1) <
+                _SEQ_ALPHA): stop early only if the NSL>=1.0 ladder-boundary
+                decision is invariant across a conservative 99%
+                distribution-free bound on the null IQR estimated from the
+                draws so far (see _conservative_iqr_bound / _nsl_decision_stable).
+                p_value here uses the standard Laplace-corrected formula
+                (count+1)/(n+1) -- the Besag-Clifford h/n formula is only
+                valid for the exact h-exceedance stopping rule above.
+              - Otherwise: continue to the next batch, up to _SEQ_N_MAX. If
+                _SEQ_N_MAX is reached without either rule firing, p_value
+                also uses (count+1)/(n+1).
+            RNG: children are spawned once for _SEQ_N_MAX up front
+            (np.random.SeedSequence(seed).spawn(_SEQ_N_MAX)), so draw i is
+            byte-identical to the fixed_v1 scheme's draw i, and to whatever
+            draw i would be regardless of where/whether stopping occurs --
+            verified empirically (spawn(N)[:k] == spawn(k) for any k <= N)
+            before this was implemented.
     """
     t0 = time.perf_counter()
     rng = np.random.default_rng(seed)
@@ -428,9 +551,10 @@ def estimate_fixable_leakage_null(
 
     # If no forbidden features, null is degenerate (B=C always → fixable_leakage=0)
     if not forbidden_cols:
-        null_samples = np.zeros(n_permutations)
+        _degen_n = 0 if stopping == "sequential_v1" else n_permutations
+        null_samples = np.zeros(_degen_n)
         # Laplace-corrected p: observed <= 0 → all N zeros >= observed → p = (N+1)/(N+1) = 1
-        _p_degen = 1.0 if observed_fixable_leakage <= 0.0 else 1.0 / (n_permutations + 1)
+        _p_degen = 1.0 if observed_fixable_leakage <= 0.0 else 1.0 / (_degen_n + 1)
         return NullResult(
             observed=observed_fixable_leakage,
             null_samples=null_samples,
@@ -440,9 +564,11 @@ def estimate_fixable_leakage_null(
             null_iqr=0.0,
             p_value=_p_degen,
             method=method,
-            n_permutations=n_permutations,
+            n_permutations=_degen_n,
             elapsed_seconds=time.perf_counter() - t0,
             scheme=_scheme,
+            stopping=stopping,
+            stopped_early=False,
         )
 
     # No-op guard (fail-safe epistemics): across-entity permutation needs >=2
@@ -464,6 +590,8 @@ def estimate_fixable_leakage_null(
             n_permutations=0,
             elapsed_seconds=time.perf_counter() - t0,
             scheme=_scheme,
+            stopping=stopping,
+            stopped_early=False,
         )
 
     # Build temporal folds (same structure as the engine uses)
@@ -480,6 +608,8 @@ def estimate_fixable_leakage_null(
     interior_fold_idxs = _build_interior_fold_set(df, contract, config, temp_folds)
 
     null_samples: list[float] = []
+    _stopped_early = False
+    _p_value_override: Optional[float] = None
 
     if method in ("within_entity", "across_entity"):
         # Invariant: AUC_C_pool doesn't change when forbidden features are permuted
@@ -493,11 +623,6 @@ def estimate_fixable_leakage_null(
         if y_pool is None:
             raise RuntimeError("No interior folds produced OOF predictions for AUC_C.")
         auc_c_pool = float(roc_auc_score(y_pool, proba_c_pool))
-
-        # spawn_v2 seeding: permutation i always draws from children[i], an
-        # independent child stream — never a shared, order-dependent Generator.
-        # This is what makes null_samples independent of n_jobs / scheduling.
-        children = np.random.SeedSequence(seed).spawn(n_permutations)
 
         # F2a-perf fast path: the feature matrix is identical across every
         # permutation except the forbidden column(s), so build it once here
@@ -516,38 +641,101 @@ def estimate_fixable_leakage_null(
         else:
             entity_codes, entity_n_groups = None, None
 
-        if n_jobs == 1:
-            raw_samples: list = []
-            for i in range(n_permutations):
-                raw_samples.append(
+        def _dispatch_batch(child_batch: list) -> list:
+            """Run one batch of permutation draws, serial or parallel."""
+            if n_jobs == 1:
+                return [
                     _null_permutation_once(
-                        children[i], df, forbidden_cols, contract.entity_id, method,
+                        c, df, forbidden_cols, contract.entity_id, method,
                         all_feature_cols, contract.target, temp_folds, model_factory,
                         interior_fold_idxs, auc_c_pool, y_pool,
                         X_base=X_base, y_all=y_all,
                         forbidden_col_positions=forbidden_col_positions,
                         entity_codes=entity_codes, entity_n_groups=entity_n_groups,
                     )
-                )
-                if verbose and (i + 1) % 10 == 0:
-                    print(f"  [{i+1}/{n_permutations}] running...", flush=True)
-        else:
+                    for c in child_batch
+                ]
             from joblib import Parallel, delayed  # noqa: PLC0415
-            raw_samples = Parallel(
+            return Parallel(
                 n_jobs=n_jobs, backend="loky", verbose=10 if verbose else 0,
             )(
                 delayed(_null_permutation_once)(
-                    children[i], df, forbidden_cols, contract.entity_id, method,
+                    c, df, forbidden_cols, contract.entity_id, method,
                     all_feature_cols, contract.target, temp_folds, model_factory,
                     interior_fold_idxs, auc_c_pool, y_pool,
                     X_base=X_base, y_all=y_all,
                     forbidden_col_positions=forbidden_col_positions,
                     entity_codes=entity_codes, entity_n_groups=entity_n_groups,
                 )
-                for i in range(n_permutations)
+                for c in child_batch
             )
 
-        null_samples = [s for s in raw_samples if s is not None]
+        if stopping == "fixed_v1":
+            # spawn_v2 seeding: permutation i always draws from children[i], an
+            # independent child stream — never a shared, order-dependent Generator.
+            # This is what makes null_samples independent of n_jobs / scheduling.
+            children = np.random.SeedSequence(seed).spawn(n_permutations)
+
+            if n_jobs == 1:
+                raw_samples: list = []
+                for i in range(n_permutations):
+                    raw_samples.extend(_dispatch_batch([children[i]]))
+                    if verbose and (i + 1) % 10 == 0:
+                        print(f"  [{i+1}/{n_permutations}] running...", flush=True)
+            else:
+                raw_samples = _dispatch_batch(list(children))
+
+            null_samples = [s for s in raw_samples if s is not None]
+
+        elif stopping == "sequential_v1":
+            # Tier 2: Besag-Clifford exceedance-count rule + decision-stability
+            # early stop. See estimate_fixable_leakage_null's docstring for the
+            # full rule. Spawn once for _SEQ_N_MAX so draw i is byte-identical
+            # regardless of where (or whether) stopping occurs.
+            children = np.random.SeedSequence(seed).spawn(_SEQ_N_MAX)
+            batch_size = n_jobs if n_jobs > 1 else 1
+
+            raw_index = 0
+            stop_reason = "n_max_reached"
+            while raw_index < _SEQ_N_MAX:
+                batch_end = min(raw_index + batch_size, _SEQ_N_MAX)
+                batch_results = _dispatch_batch(list(children[raw_index:batch_end]))
+                null_samples.extend(s for s in batch_results if s is not None)
+                raw_index = batch_end
+                if verbose:
+                    print(f"  [{raw_index}/{_SEQ_N_MAX}] drawn, "
+                          f"{len(null_samples)} valid...", flush=True)
+
+                n_valid = len(null_samples)
+                if n_valid < _SEQ_N_MIN:
+                    continue
+                arr_running = np.array(null_samples)
+                count_gte = int(np.sum(arr_running >= observed_fixable_leakage))
+
+                if count_gte >= _SEQ_H:
+                    stop_reason = "h_exceedance"
+                    _stopped_early = True
+                    break
+
+                p_running = (count_gte + 1) / (n_valid + 1)
+                if p_running < _SEQ_ALPHA:
+                    null_99th_running = float(np.percentile(arr_running, 99))
+                    iqr_lo, iqr_hi = _conservative_iqr_bound(arr_running, _SEQ_IQR_CONFIDENCE)
+                    if _nsl_decision_stable(
+                        observed_fixable_leakage, null_99th_running, iqr_lo, iqr_hi
+                    ):
+                        stop_reason = "decision_stable"
+                        _stopped_early = True
+                        break
+
+            if stop_reason == "h_exceedance":
+                _p_value_override = _SEQ_H / len(null_samples)
+
+        else:
+            raise ValueError(
+                f"estimate_fixable_leakage_null: unsupported stopping {stopping!r}. "
+                "Use 'fixed_v1' or 'sequential_v1'."
+            )
 
     elif method == "target_within_period":
         # Target is permuted → both B and C change every iteration; no invariant to exploit
@@ -578,12 +766,18 @@ def estimate_fixable_leakage_null(
 
     arr = np.array(null_samples)
     n_draws = len(arr)
-    # Laplace-corrected p-value: (count + 1) / (N + 1).
-    # Prevents p = 0.0 when no null sample reaches the observed value (which would
-    # make the minimum representable p depend on N rather than reality).
-    # For N=100: minimum p ≈ 1/101 ≈ 0.0099, consistent with alpha=0.01.
-    count_gte = int(np.sum(arr >= observed_fixable_leakage))
-    p_value = (count_gte + 1) / (n_draws + 1)
+    if _p_value_override is not None:
+        # Besag-Clifford exact rule (sequential_v1, stopped on h exceedances):
+        # p = h / n_drawn. Valid specifically because the stopping rule itself
+        # waited for the h-th exceedance -- not the generic Laplace estimator.
+        p_value = _p_value_override
+    else:
+        # Laplace-corrected p-value: (count + 1) / (N + 1).
+        # Prevents p = 0.0 when no null sample reaches the observed value (which would
+        # make the minimum representable p depend on N rather than reality).
+        # For N=100: minimum p ≈ 1/101 ≈ 0.0099, consistent with alpha=0.01.
+        count_gte = int(np.sum(arr >= observed_fixable_leakage))
+        p_value = (count_gte + 1) / (n_draws + 1)
 
     return NullResult(
         observed=observed_fixable_leakage,
@@ -595,6 +789,8 @@ def estimate_fixable_leakage_null(
         p_value=p_value,
         method=method,
         n_permutations=n_draws,
+        stopping=stopping,
+        stopped_early=_stopped_early,
         elapsed_seconds=time.perf_counter() - t0,
         scheme=_scheme,
     )
