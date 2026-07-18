@@ -91,7 +91,7 @@ from sklearn.metrics import roc_auc_score
 
 from zekan.config.schema import ZekanConfig
 from zekan.contract.prediction_contract import PredictionContract
-from zekan.severity.metrics import evaluate_folds
+from zekan.severity.metrics import _feature_matrix, evaluate_folds
 from zekan.severity.splitters import temporal_expanding_folds
 
 
@@ -117,6 +117,31 @@ class NullResult:
 
 # ── Permutation strategies ────────────────────────────────────────────────────
 
+def _permute_column_within_entity(
+    values: np.ndarray,
+    entity_codes: np.ndarray,
+    n_groups: int,
+    rng: np.random.Generator,
+) -> np.ndarray:
+    """Shuffle `values` within each entity group; one rng.permutation() call
+    per group, iterated in group-code order (0..n_groups-1).
+
+    `entity_codes`/`n_groups` come from pd.factorize(entity_values, sort=False)
+    -- group-code order under sort=False is each entity's FIRST-OCCURRENCE
+    order in the original row sequence, which is exactly the iteration order
+    pandas' groupby(sort=False) uses. This was verified empirically (matching
+    call sequence, matching output, and matching downstream RNG state after
+    the call) against the groupby(sort=False).transform(lambda x:
+    rng.permutation(x.values)) pattern this replaces, before this change was
+    made -- see scratch/verify_rng_order.py.
+    """
+    result = np.empty_like(values)
+    for group_id in range(n_groups):
+        idx = np.where(entity_codes == group_id)[0]
+        result[idx] = rng.permutation(values[idx])
+    return result
+
+
 def _permute_within_entity(
     df: pd.DataFrame,
     forbidden_cols: list[str],
@@ -127,13 +152,23 @@ def _permute_within_entity(
 
     Row indices and all other columns are unchanged.
     Returns a copy; never mutates the input.
+
+    Implementation note: this used to call
+    df.groupby(entity_col, sort=False)[col].transform(lambda x: rng.permutation(x.values))
+    directly. That is replaced here by _permute_column_within_entity, which
+    does the same per-group rng.permutation() calls in the same order (see its
+    docstring) via a vectorized pd.factorize grouping instead of pandas'
+    groupby/transform/lambda dispatch machinery -- profiling showed the latter
+    costs roughly 260x more per call than an equivalent-sized vectorized
+    global shuffle, almost entirely in per-group Python-level dispatch
+    overhead unrelated to the actual permutation work.
     """
     df_perm = df.copy()
+    entity_codes, entity_uniques = pd.factorize(df[entity_col].to_numpy(), sort=False)
+    n_groups = len(entity_uniques)
     for col in forbidden_cols:
-        df_perm[col] = (
-            df_perm.groupby(entity_col, sort=False)[col]
-            .transform(lambda x: rng.permutation(x.values))
-        )
+        values = df_perm[col].to_numpy()
+        df_perm[col] = _permute_column_within_entity(values, entity_codes, n_groups, rng)
     return df_perm
 
 
@@ -193,6 +228,11 @@ def _null_permutation_once(
     interior_fold_idxs: set[int],
     auc_c_pool: float,
     y_pool: np.ndarray,
+    X_base: Optional[np.ndarray] = None,
+    y_all: Optional[np.ndarray] = None,
+    forbidden_col_positions: Optional[list[int]] = None,
+    entity_codes: Optional[np.ndarray] = None,
+    entity_n_groups: Optional[int] = None,
 ) -> Optional[float]:
     """Compute one permutation draw: auc_b_perm - auc_c_pool, or None when no
     interior fold produced OOF predictions (mirrors the original `continue`
@@ -209,19 +249,51 @@ def _null_permutation_once(
     zekan.severity.ablation._ablate_one.  method must be "within_entity" or
     "across_entity"; auc_c_pool/y_pool are read-only constants shared (by
     value) across every call, computed once by the caller before dispatch.
+
+    X_base / y_all / forbidden_col_positions / entity_codes / entity_n_groups
+        Optional fast path (F2a-perf): when X_base is given, the feature
+        matrix for ALL rows is already built (once, by the caller, shared
+        read-only across every permutation) and this call only copies it and
+        overwrites the forbidden column(s)' positions with freshly-permuted
+        values, instead of copying the whole dataframe and re-deriving the
+        matrix from scratch via evaluate_folds. The rng call sequence is
+        identical to the df_perm path below either way (see
+        _permute_column_within_entity's docstring for the within_entity case;
+        across_entity is a single rng.permutation() per forbidden column in
+        both paths). When X_base is None (the default), falls back to the
+        original df_perm-based path unchanged -- this keeps every existing
+        direct call to this function (bypassing the real caller's precompute)
+        correct without passing the new arguments.
     """
     rng = np.random.default_rng(child_seed)
-    if method == "within_entity":
-        df_perm = _permute_within_entity(df, forbidden_cols, entity_col, rng)
-    elif method == "across_entity":
-        df_perm = _permute_across_entity(df, forbidden_cols, rng)
-    else:
-        raise ValueError(f"_null_permutation_once: unsupported method {method!r}")
 
-    eval_b_perm = evaluate_folds(
-        df_perm, all_feature_cols, target_col, temp_folds, model_factory,
-        return_predictions=True,
-    )
+    if X_base is not None:
+        if method not in ("within_entity", "across_entity"):
+            raise ValueError(f"_null_permutation_once: unsupported method {method!r}")
+        X_perm = X_base.copy()
+        for pos in forbidden_col_positions:
+            if method == "within_entity":
+                X_perm[:, pos] = _permute_column_within_entity(
+                    X_base[:, pos], entity_codes, entity_n_groups, rng
+                )
+            else:
+                X_perm[:, pos] = rng.permutation(X_base[:, pos])
+        eval_b_perm = evaluate_folds(
+            df, all_feature_cols, target_col, temp_folds, model_factory,
+            return_predictions=True, X_all=X_perm, y_all=y_all,
+        )
+    else:
+        if method == "within_entity":
+            df_perm = _permute_within_entity(df, forbidden_cols, entity_col, rng)
+        elif method == "across_entity":
+            df_perm = _permute_across_entity(df, forbidden_cols, rng)
+        else:
+            raise ValueError(f"_null_permutation_once: unsupported method {method!r}")
+
+        eval_b_perm = evaluate_folds(
+            df_perm, all_feature_cols, target_col, temp_folds, model_factory,
+            return_predictions=True,
+        )
     b_fe_by_idx = {fe.meta.fold_idx: fe for fe in eval_b_perm.fold_evals}
     proba_b_parts = [
         b_fe_by_idx[idx].proba
@@ -427,6 +499,23 @@ def estimate_fixable_leakage_null(
         # This is what makes null_samples independent of n_jobs / scheduling.
         children = np.random.SeedSequence(seed).spawn(n_permutations)
 
+        # F2a-perf fast path: the feature matrix is identical across every
+        # permutation except the forbidden column(s), so build it once here
+        # (float32, via the same guarded cast evaluate_folds itself uses) and
+        # let _null_permutation_once patch just those columns per draw,
+        # instead of copying the whole dataframe and re-deriving the matrix
+        # from scratch on every one of the n_permutations calls below.
+        X_base = _feature_matrix(df, all_feature_cols)
+        y_all = df[contract.target].to_numpy()
+        forbidden_col_positions = [all_feature_cols.index(c) for c in forbidden_cols]
+        if method == "within_entity":
+            entity_codes, entity_uniques = pd.factorize(
+                df[contract.entity_id].to_numpy(), sort=False
+            )
+            entity_n_groups = len(entity_uniques)
+        else:
+            entity_codes, entity_n_groups = None, None
+
         if n_jobs == 1:
             raw_samples: list = []
             for i in range(n_permutations):
@@ -435,6 +524,9 @@ def estimate_fixable_leakage_null(
                         children[i], df, forbidden_cols, contract.entity_id, method,
                         all_feature_cols, contract.target, temp_folds, model_factory,
                         interior_fold_idxs, auc_c_pool, y_pool,
+                        X_base=X_base, y_all=y_all,
+                        forbidden_col_positions=forbidden_col_positions,
+                        entity_codes=entity_codes, entity_n_groups=entity_n_groups,
                     )
                 )
                 if verbose and (i + 1) % 10 == 0:
@@ -448,6 +540,9 @@ def estimate_fixable_leakage_null(
                     children[i], df, forbidden_cols, contract.entity_id, method,
                     all_feature_cols, contract.target, temp_folds, model_factory,
                     interior_fold_idxs, auc_c_pool, y_pool,
+                    X_base=X_base, y_all=y_all,
+                    forbidden_col_positions=forbidden_col_positions,
+                    entity_codes=entity_codes, entity_n_groups=entity_n_groups,
                 )
                 for i in range(n_permutations)
             )
