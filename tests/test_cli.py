@@ -711,6 +711,29 @@ def test_audit_estimator_logistic_completes(tmp_path):
     assert "✓ TRUSTED" in result.output
 
 
+def test_audit_estimator_histgb_deterministic_byte_identical(tmp_path):
+    """--estimator histgb is accepted and produces byte-identical JSON across
+    two consecutive runs on a small fixture -- the hard prerequisite for using
+    it in any trust gate. early_stopping is pinned off in the factory
+    (see estimators.py), so this must hold regardless of row count."""
+    df = make_clean_dataset(n_entities=_N_ENTITIES, snapshots_per_entity=_SNAPSHOTS, seed=1)
+    csv = tmp_path / "data.csv"
+    cfg = tmp_path / "zekan.yml"
+    df.to_csv(csv, index=False)
+    cfg.write_text(_CLEAN_CONFIG)
+
+    args = [
+        "audit", "--data", str(csv), "--config", str(cfg),
+        "--estimator", "histgb", "--json",
+    ]
+    r1 = runner.invoke(app, args)
+    r2 = runner.invoke(app, args)
+
+    assert r1.exit_code == 0, r1.output
+    assert r2.exit_code == 0, r2.output
+    assert r1.stdout == r2.stdout
+
+
 def test_audit_no_estimator_json_is_deterministic(tmp_path, monkeypatch):
     """Omitting --estimator produces byte-identical JSON across two consecutive runs."""
     monkeypatch.setattr("zekan.severity.metrics._default_model_factory", _fast_clf)

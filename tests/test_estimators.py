@@ -7,6 +7,7 @@ import typer
 from sklearn.ensemble import (
     ExtraTreesClassifier,
     GradientBoostingClassifier,
+    HistGradientBoostingClassifier,
     RandomForestClassifier,
 )
 from sklearn.linear_model import LogisticRegression
@@ -15,7 +16,10 @@ from zekan.severity.estimators import _ESTIMATOR_ALLOWLIST, _build_factory
 
 
 def test_allowlist_contains_expected_keys():
-    assert set(_ESTIMATOR_ALLOWLIST) == {"rf", "extra_trees", "gbm", "logistic"}
+    # re-baselined: Tier 3 Phase B adds "histgb" (additive)
+    assert set(_ESTIMATOR_ALLOWLIST) == {
+        "rf", "extra_trees", "gbm", "histgb", "logistic",
+    }
 
 
 def test_rf_factory_returns_seeded_rf():
@@ -39,6 +43,17 @@ def test_gbm_factory_returns_seeded_gbm():
     assert isinstance(est, GradientBoostingClassifier)
     assert est.random_state == 42
     assert est.n_estimators == 200
+
+
+def test_histgb_factory_returns_seeded_histgb_with_early_stopping_off():
+    est = _build_factory("histgb")()
+    assert isinstance(est, HistGradientBoostingClassifier)
+    assert est.random_state == 42
+    # early_stopping pinned OFF (not sklearn's own 'auto' default): 'auto'
+    # would silently enable an internal validation split above 10k rows,
+    # making behavior discontinuous in row count -- unacceptable for a trust
+    # gate. See the comment at the factory's construction site.
+    assert est.early_stopping is False
 
 
 def test_logistic_factory_returns_seeded_logistic():
