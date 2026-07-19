@@ -95,6 +95,12 @@ class SeverityResult:
     null_stopping: str = "fixed_v1"               # "fixed_v1" or "sequential_v1"
     null_stopped_early: bool = False              # within-entity null stopped before _SEQ_N_MAX
     null_stopped_early_across: bool = False       # across-entity null stopped before _SEQ_N_MAX
+    # Tier 2b-final -- additive; False for every pre-Tier-2b-final caller (the
+    # default run_severity_analysis() value). True iff p_value is the Laplace
+    # formula's floor (1/(n+1), zero null draws reached observed) rather than a
+    # count-backed estimate -- see null_baseline.NullResult.p_is_upper_bound.
+    p_is_upper_bound: bool = False
+    p_is_upper_bound_across: bool = False
     feature_attribution: Optional[Any] = None     # AblationSummary when ablation ran; None otherwise
     folds: list = field(default_factory=list)     # temporal FoldIndices used for B/C eval; internal only
 
@@ -368,6 +374,7 @@ def run_severity_analysis(
     nsl: Optional[float] = None
     n_permutations_run = 0
     null_stopped_early = False
+    p_is_upper_bound = False
 
     # Across-entity null (spec 1) — additive second channel; stays None unless it
     # actually runs (see the no-op guard in estimate_fixable_leakage_null).
@@ -379,6 +386,7 @@ def run_severity_analysis(
     nsl_across: Optional[float] = None
     n_permutations_across = 0
     null_stopped_early_across = False
+    p_is_upper_bound_across = False
 
     if n_permutations > 0:
         from zekan.severity.null_baseline import estimate_fixable_leakage_null
@@ -400,6 +408,7 @@ def run_severity_analysis(
         p_value = _null.p_value
         n_permutations_run = _null.n_permutations
         null_stopped_early = _null.stopped_early
+        p_is_upper_bound = _null.p_is_upper_bound
         # NSL denominator: IQR of null distribution (stable at N=100; the
         # 99th-percentile−median spread near the tail is noisy at N=100 because
         # q99 ≈ max, whose sampling variance dominates).
@@ -433,6 +442,7 @@ def run_severity_analysis(
             p_value_across = _null_across.p_value
             n_permutations_across = _null_across.n_permutations
             null_stopped_early_across = _null_across.stopped_early
+            p_is_upper_bound_across = _null_across.p_is_upper_bound
             _null_unit_across = max(_null_across.null_iqr, _NSL_EPS)
             nsl_across = (fixable_leakage - _null_across.null_99th) / _null_unit_across
 
@@ -464,6 +474,8 @@ def run_severity_analysis(
         null_stopping=null_stopping,
         null_stopped_early=null_stopped_early,
         null_stopped_early_across=null_stopped_early_across,
+        p_is_upper_bound=p_is_upper_bound,
+        p_is_upper_bound_across=p_is_upper_bound_across,
         feature_attribution=feature_attribution,
         folds=temp_folds,
     )

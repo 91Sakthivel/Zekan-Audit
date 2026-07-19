@@ -149,6 +149,15 @@ class EngineDetection(BaseModel):
     reaching the locked ceiling. False under fixed_v1. None when not run."""
     stopped_early_across: Optional[bool] = None
     """Same as stopped_early, for the across-entity null."""
+    p_is_upper_bound: Optional[bool] = None
+    """Tier 2b-final: True iff p_value is the Laplace formula's floor value
+    (1/(n+1), zero null draws reached observed) rather than a count-backed
+    estimate -- the surface telling the truth about what kind of number
+    p_value is when a sequential run stops early with zero exceedances. None
+    when the within-entity null did not run."""
+    p_is_upper_bound_across: Optional[bool] = None
+    """Same as p_is_upper_bound, for the across-entity null. None when the
+    across-entity null did not run."""
 
 
 class MeasuredDamage(BaseModel):
@@ -718,6 +727,8 @@ def build_verdict(
         n_drawn_across=result.n_permutations_across if _across_ran else None,
         stopped_early=result.null_stopped_early if _null_ran else None,
         stopped_early_across=result.null_stopped_early_across if _across_ran else None,
+        p_is_upper_bound=result.p_is_upper_bound if _null_ran else None,
+        p_is_upper_bound_across=result.p_is_upper_bound_across if _across_ran else None,
     )
 
     # ── measured_damage block ─────────────────────────────────────────────────

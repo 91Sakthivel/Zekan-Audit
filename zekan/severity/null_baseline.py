@@ -106,9 +106,43 @@ from zekan.severity.splitters import temporal_expanding_folds
 _SEQ_H: int = 10                    # Besag-Clifford exceedance-count stopping threshold
 _SEQ_N_MIN: int = 30                # minimum draws before any early-stop check runs
 _SEQ_N_MAX: int = 500               # hard ceiling; spawn(N_MAX) up front (see module docstring)
-_SEQ_ALPHA: float = 0.01            # mirrors engine._NULL_ALPHA; only gates the internal
-                                     # decision-stability check below, not the final verdict
+_SEQ_ALPHA: float = 0.01            # mirrors engine._NULL_ALPHA. Historically also gated when
+                                     # the decision-stability check below was allowed to run;
+                                     # Tier 2b FIX A removed that gate (it was the defect: it
+                                     # forced ~100 draws before the check could even be attempted
+                                     # when count_gte==0, regardless of NSL's distance from the
+                                     # 1.0 boundary). Kept here as the documented alpha this
+                                     # module's design is calibrated against (see the h/N_max
+                                     # ratio note in estimate_fixable_leakage_null's docstring).
 _SEQ_IQR_CONFIDENCE: float = 0.99   # conservative (wide) two-sided CI for the IQR-stability check
+
+
+def _derive_alpha_floor_draws(alpha: float) -> int:
+    """Smallest n such that the zero-exceedance Laplace-corrected p-value,
+    1 / (n + 1), is STRICTLY less than alpha -- the honest information-
+    theoretic minimum number of permutation draws before a DETECTED
+    conclusion is possible at all, regardless of how the stopping rule is
+    written (Tier 2b-final; see Addendum 5 and TIER2B_CALIBRATION.md).
+
+    Derived by direct search over the actual formula, not assumed
+    algebraically: for alpha=0.01 this is 100, not 99. At n=99,
+    1/(99+1) = 0.01 exactly, which is NOT strictly less than 0.01 (engine.py's
+    gate is `if p_value >= _NULL_ALPHA: not-detected`, i.e. detection needs
+    strict p < alpha). At n=100, 1/(100+1) ~= 0.00990099, which is. Addendum 5
+    stated ceil(1/alpha)-1 = 99 for this floor; that was off by one, corrected
+    here rather than edited into the (append-only) addendum.
+    """
+    n = 1
+    while 1.0 / (n + 1) >= alpha:
+        n += 1
+    return n
+
+
+_ALPHA_FLOOR_DRAWS: int = _derive_alpha_floor_draws(_SEQ_ALPHA)
+"""The honest minimum draws before a DETECTED (p < alpha) conclusion is
+possible with zero exceedances. 100 for alpha=0.01 -- see
+_derive_alpha_floor_draws. Used only to gate the DETECTED-direction early
+stop (Tier 2b-final Part 2); the NOT-DETECTED direction has no floor."""
 
 
 def _quantile_order_stat_indices(n: int, p: float, confidence: float) -> tuple[int, int]:
@@ -153,28 +187,77 @@ def _conservative_iqr_bound(samples: np.ndarray, confidence: float) -> tuple[flo
     return iqr_low, iqr_high
 
 
+def _conservative_quantile_bound(
+    samples: np.ndarray, p: float, confidence: float
+) -> tuple[float, float]:
+    """Conservative order-statistic CI [lo, hi] for the p-th population
+    quantile of `samples` -- same normal-approximation method as
+    _conservative_iqr_bound's Q25/Q75 bounds (see _quantile_order_stat_indices).
+
+    Factored out (Tier 2b FIX A) so null_99th's own sampling uncertainty can
+    be bounded the same way null_iqr's is, instead of being held at its point
+    estimate -- see _nsl_decision_stable.
+    """
+    n = len(samples)
+    sorted_samples = np.sort(samples)
+    lo_idx, hi_idx = _quantile_order_stat_indices(n, p, confidence)
+    return float(sorted_samples[lo_idx]), float(sorted_samples[hi_idx])
+
+
+def _nsl_interval_bound(
+    observed_fixable_leakage: float,
+    null_99th_lo: float,
+    null_99th_hi: float,
+    iqr_low: float,
+    iqr_high: float,
+    nsl_eps: float = 1e-4,
+) -> tuple[float, float]:
+    """Conservative [nsl_min, nsl_max] bound on NSL given BOTH the
+    [iqr_low, iqr_high] bound on the null IQR AND the [null_99th_lo,
+    null_99th_hi] bound on null_99th itself (Tier 2b FIX A -- previously
+    null_99th was held at its point estimate and only null_iqr was bounded).
+
+    NSL(x, y) = (observed - x) / y is monotonically decreasing in x for any
+    y > 0 (derivative -1/y < 0 always), so the global max over the
+    [null_99th_lo, null_99th_hi] x [iqr_low, iqr_high] box is attained at
+    x=null_99th_lo, and the global min at x=null_99th_hi -- regardless of the
+    numerator's sign. For each of those two x-corners, whether increasing or
+    decreasing y increases the quotient depends on the numerator's sign at
+    that corner (dividing a positive numerator by a smaller y increases it;
+    dividing a negative numerator by a smaller y decreases it further), so
+    the y-corner is chosen per-corner rather than assumed fixed.
+
+    Factored out of _nsl_decision_stable (Tier 2b-final) so callers can also
+    tell WHICH side of 1.0 a stable interval landed on -- needed to decide
+    whether the DETECTED-direction alpha floor applies (see the sequential_v1
+    loop in estimate_fixable_leakage_null).
+    """
+    num_hi = observed_fixable_leakage - null_99th_lo  # candidate for the global max
+    denom_for_max = iqr_low if num_hi >= 0 else iqr_high
+    nsl_max = num_hi / max(denom_for_max, nsl_eps)
+
+    num_lo = observed_fixable_leakage - null_99th_hi  # candidate for the global min
+    denom_for_min = iqr_high if num_lo >= 0 else iqr_low
+    nsl_min = num_lo / max(denom_for_min, nsl_eps)
+
+    return nsl_min, nsl_max
+
+
 def _nsl_decision_stable(
     observed_fixable_leakage: float,
-    null_99th: float,
+    null_99th_lo: float,
+    null_99th_hi: float,
     iqr_low: float,
     iqr_high: float,
     nsl_eps: float = 1e-4,
 ) -> bool:
     """True iff the NSL>=1.0 vs <1.0 ladder-boundary decision is unchanged
-    across the conservative [iqr_low, iqr_high] bound on the null IQR.
-
-    Scope, stated plainly: this checks stability ONLY with respect to
-    null_iqr's sampling uncertainty (per the pre-registered spec). null_99th
-    is held at its current point estimate throughout -- it is not separately
-    bounded here. NSL = (observed - null_99th) / max(null_iqr, nsl_eps); since
-    null_iqr is in the denominator, the smallest plausible IQR gives the
-    largest-magnitude NSL and the largest plausible IQR gives the
-    smallest-magnitude NSL, so checking both ends of the bound is sufficient
-    to establish stability of the >=1.0 boundary specifically.
+    across the conservative NSL interval from _nsl_interval_bound.
     """
-    nsl_worst = (observed_fixable_leakage - null_99th) / max(iqr_low, nsl_eps)
-    nsl_best = (observed_fixable_leakage - null_99th) / max(iqr_high, nsl_eps)
-    return (nsl_worst >= 1.0) == (nsl_best >= 1.0)
+    nsl_min, nsl_max = _nsl_interval_bound(
+        observed_fixable_leakage, null_99th_lo, null_99th_hi, iqr_low, iqr_high, nsl_eps
+    )
+    return (nsl_min >= 1.0) == (nsl_max >= 1.0)
 
 
 # ── Result ────────────────────────────────────────────────────────────────────
@@ -198,6 +281,11 @@ class NullResult:
     stopping: str = "fixed_v1"   # "fixed_v1" (draw exactly n_permutations, unchanged default)
                                   # or "sequential_v1" (Tier 2: Besag-Clifford + decision-stability)
     stopped_early: bool = False  # True iff sequential_v1 stopped before _SEQ_N_MAX
+    p_is_upper_bound: bool = False  # Tier 2b-final: True iff p_value == 1/(n+1) because zero
+                                      # null draws reached observed -- the Laplace formula's floor,
+                                      # not a precise estimate. False when count_gte > 0 (a real
+                                      # count backs the p-value) or when the Besag-Clifford exact
+                                      # h/n formula applies (_p_value_override; count_gte >= h > 0).
 
 
 # ── Permutation strategies ────────────────────────────────────────────────────
@@ -515,24 +603,59 @@ def estimate_fixable_leakage_null(
                 p_value cannot be significant at alpha=0.01 -- the NSL ladder
                 is never entered in this branch, so no further check is
                 needed before stopping.
-              - Decision-stability rule (only checked when running p already
-                looks significant, i.e. count < h but (count+1)/(n+1) <
-                _SEQ_ALPHA): stop early only if the NSL>=1.0 ladder-boundary
-                decision is invariant across a conservative 99%
-                distribution-free bound on the null IQR estimated from the
-                draws so far (see _conservative_iqr_bound / _nsl_decision_stable).
+              - Decision-stability rule (Tier 2b FIX A + Tier 2b-final,
+                asymmetric): checked on EVERY batch once n_valid >= _SEQ_N_MIN,
+                no longer gated behind "running p already looks significant"
+                (that was the Tier 2 defect: for the common zero-exceedance
+                case it required n>=100 before the check was even attempted,
+                regardless of how far NSL already sat from the 1.0 boundary).
+                Computes a conservative NSL interval [nsl_min, nsl_max] from a
+                99% distribution-free bound on BOTH the null IQR and
+                null_99th itself (see _conservative_iqr_bound /
+                _conservative_quantile_bound / _nsl_interval_bound), and asks
+                whether that whole interval sits on one side of 1.0:
+                  * NOT-DETECTED side (nsl_max < 1.0): stop immediately, no
+                    floor. "This isn't a leak" is a claim the data supports at
+                    low n regardless of exceedance count -- this is the common
+                    clean-data case and gets the full speedup.
+                  * DETECTED side (nsl_min >= 1.0): NSL alone is NOT enough to
+                    stop. engine.py's reality gate requires p_value < alpha
+                    before NSL is even consulted, and the Laplace-corrected
+                    p_value = (count_gte+1)/(n+1) has a hard floor that cannot
+                    cross alpha before _ALPHA_FLOOR_DRAWS draws when
+                    count_gte==0 (more, if count_gte>0) -- no matter how
+                    stable the NSL interval looks. Stopping on NSL stability
+                    alone here would flip a genuine FAIL to
+                    UNCONFIRMED_HIGH_DAMAGE purely because p hadn't run long
+                    enough (see Addendum 5 -- this is exactly the bug it
+                    recorded). So this side only stops once n_valid >=
+                    _ALPHA_FLOOR_DRAWS AND the actual running p_value has
+                    itself crossed alpha at the current exceedance count;
+                    otherwise it keeps drawing (Besag-Clifford's h=10 rule or
+                    the N_MAX backstop resolve it if this persists).
                 p_value here uses the standard Laplace-corrected formula
                 (count+1)/(n+1) -- the Besag-Clifford h/n formula is only
                 valid for the exact h-exceedance stopping rule above.
               - Otherwise: continue to the next batch, up to _SEQ_N_MAX. If
                 _SEQ_N_MAX is reached without either rule firing, p_value
                 also uses (count+1)/(n+1).
+            p_is_upper_bound (NullResult field): True whenever p_value ==
+            1/(n+1) because zero null draws reached observed_fixable_leakage
+            -- the Laplace formula's floor value, not a precise estimate of a
+            small p. False when count_gte > 0, or when the Besag-Clifford
+            exact h/n formula applies. Threads through to
+            SeverityResult/EngineDetection/JSON as an additive field.
             RNG: children are spawned once for _SEQ_N_MAX up front
             (np.random.SeedSequence(seed).spawn(_SEQ_N_MAX)), so draw i is
             byte-identical to the fixed_v1 scheme's draw i, and to whatever
             draw i would be regardless of where/whether stopping occurs --
             verified empirically (spawn(N)[:k] == spawn(k) for any k <= N)
             before this was implemented.
+            Tier 2b FIX B: the loky worker pool is constructed ONCE for the
+            whole sequential run (a persistent `with Parallel(...) as
+            parallel:` context reused across every batch dispatch) instead of
+            once per batch -- see _dispatch_batch. Draw i's value is
+            unaffected either way; only wall-clock changes.
     """
     t0 = time.perf_counter()
     rng = np.random.default_rng(seed)
@@ -555,6 +678,12 @@ def estimate_fixable_leakage_null(
         null_samples = np.zeros(_degen_n)
         # Laplace-corrected p: observed <= 0 → all N zeros >= observed → p = (N+1)/(N+1) = 1
         _p_degen = 1.0 if observed_fixable_leakage <= 0.0 else 1.0 / (_degen_n + 1)
+        # Same zero-exceedance-floor logic as the main return path below: when
+        # observed > 0, every degenerate (all-zero) draw is < observed, so
+        # count_gte == 0 exactly and _p_degen is the same Laplace floor value.
+        # When observed <= 0, every draw >= observed instead -- a saturated,
+        # exact p=1.0, not a floor artifact.
+        _p_degen_is_upper_bound = observed_fixable_leakage > 0.0
         return NullResult(
             observed=observed_fixable_leakage,
             null_samples=null_samples,
@@ -569,6 +698,7 @@ def estimate_fixable_leakage_null(
             scheme=_scheme,
             stopping=stopping,
             stopped_early=False,
+            p_is_upper_bound=_p_degen_is_upper_bound,
         )
 
     # No-op guard (fail-safe epistemics): across-entity permutation needs >=2
@@ -641,8 +771,18 @@ def estimate_fixable_leakage_null(
         else:
             entity_codes, entity_n_groups = None, None
 
-        def _dispatch_batch(child_batch: list) -> list:
-            """Run one batch of permutation draws, serial or parallel."""
+        def _dispatch_batch(child_batch: list, parallel: Optional[Any] = None) -> list:
+            """Run one batch of permutation draws, serial or parallel.
+
+            `parallel`, when given, is a live joblib Parallel context (opened
+            once by the caller via `with Parallel(...) as parallel:`) reused
+            across every batch dispatch -- Tier 2b FIX B: constructing a fresh
+            Parallel() per batch reintroduced the loky pool-startup overhead
+            this project already profiled away in Tier 1 (Addendum 4). When
+            None (fixed_v1's n_jobs>1 path, a single one-shot dispatch, and
+            the n_jobs==1 serial path which never touches Parallel at all), a
+            Parallel is constructed here exactly as before.
+            """
             if n_jobs == 1:
                 return [
                     _null_permutation_once(
@@ -655,10 +795,8 @@ def estimate_fixable_leakage_null(
                     )
                     for c in child_batch
                 ]
-            from joblib import Parallel, delayed  # noqa: PLC0415
-            return Parallel(
-                n_jobs=n_jobs, backend="loky", verbose=10 if verbose else 0,
-            )(
+            from joblib import delayed  # noqa: PLC0415
+            tasks = (
                 delayed(_null_permutation_once)(
                     c, df, forbidden_cols, contract.entity_id, method,
                     all_feature_cols, contract.target, temp_folds, model_factory,
@@ -669,6 +807,12 @@ def estimate_fixable_leakage_null(
                 )
                 for c in child_batch
             )
+            if parallel is not None:
+                return parallel(tasks)
+            from joblib import Parallel  # noqa: PLC0415
+            return Parallel(
+                n_jobs=n_jobs, backend="loky", verbose=10 if verbose else 0,
+            )(tasks)
 
         if stopping == "fixed_v1":
             # spawn_v2 seeding: permutation i always draws from children[i], an
@@ -688,45 +832,108 @@ def estimate_fixable_leakage_null(
             null_samples = [s for s in raw_samples if s is not None]
 
         elif stopping == "sequential_v1":
-            # Tier 2: Besag-Clifford exceedance-count rule + decision-stability
-            # early stop. See estimate_fixable_leakage_null's docstring for the
-            # full rule. Spawn once for _SEQ_N_MAX so draw i is byte-identical
-            # regardless of where (or whether) stopping occurs.
+            # Tier 2b: Besag-Clifford exceedance-count rule (unchanged) +
+            # distance-aware decision-stability early stop (FIX A -- see
+            # _nsl_decision_stable). See estimate_fixable_leakage_null's
+            # docstring for the full rule. Spawn once for _SEQ_N_MAX so draw i
+            # is byte-identical regardless of where (or whether) stopping
+            # occurs.
             children = np.random.SeedSequence(seed).spawn(_SEQ_N_MAX)
             batch_size = n_jobs if n_jobs > 1 else 1
 
             raw_index = 0
             stop_reason = "n_max_reached"
-            while raw_index < _SEQ_N_MAX:
-                batch_end = min(raw_index + batch_size, _SEQ_N_MAX)
-                batch_results = _dispatch_batch(list(children[raw_index:batch_end]))
-                null_samples.extend(s for s in batch_results if s is not None)
-                raw_index = batch_end
-                if verbose:
-                    print(f"  [{raw_index}/{_SEQ_N_MAX}] drawn, "
-                          f"{len(null_samples)} valid...", flush=True)
 
-                n_valid = len(null_samples)
-                if n_valid < _SEQ_N_MIN:
-                    continue
-                arr_running = np.array(null_samples)
-                count_gte = int(np.sum(arr_running >= observed_fixable_leakage))
+            # FIX B: one persistent loky pool for the whole sequential run,
+            # not one per batch. nullcontext when n_jobs==1 keeps the loop
+            # below single-path -- _dispatch_batch never touches `parallel`
+            # in that case anyway (it takes the serial list-comp branch).
+            from contextlib import nullcontext  # noqa: PLC0415
+            if n_jobs > 1:
+                from joblib import Parallel  # noqa: PLC0415
+                pool_ctx = Parallel(n_jobs=n_jobs, backend="loky", verbose=10 if verbose else 0)
+            else:
+                pool_ctx = nullcontext()
 
-                if count_gte >= _SEQ_H:
-                    stop_reason = "h_exceedance"
-                    _stopped_early = True
-                    break
+            with pool_ctx as parallel:
+                while raw_index < _SEQ_N_MAX:
+                    batch_end = min(raw_index + batch_size, _SEQ_N_MAX)
+                    batch_results = _dispatch_batch(
+                        list(children[raw_index:batch_end]), parallel
+                    )
+                    null_samples.extend(s for s in batch_results if s is not None)
+                    raw_index = batch_end
+                    if verbose:
+                        print(f"  [{raw_index}/{_SEQ_N_MAX}] drawn, "
+                              f"{len(null_samples)} valid...", flush=True)
 
-                p_running = (count_gte + 1) / (n_valid + 1)
-                if p_running < _SEQ_ALPHA:
-                    null_99th_running = float(np.percentile(arr_running, 99))
-                    iqr_lo, iqr_hi = _conservative_iqr_bound(arr_running, _SEQ_IQR_CONFIDENCE)
-                    if _nsl_decision_stable(
-                        observed_fixable_leakage, null_99th_running, iqr_lo, iqr_hi
-                    ):
-                        stop_reason = "decision_stable"
+                    n_valid = len(null_samples)
+                    if n_valid < _SEQ_N_MIN:
+                        continue
+                    arr_running = np.array(null_samples)
+                    count_gte = int(np.sum(arr_running >= observed_fixable_leakage))
+
+                    if count_gte >= _SEQ_H:
+                        stop_reason = "h_exceedance"
                         _stopped_early = True
                         break
+
+                    # FIX A: checked on EVERY batch once n_valid >= N_MIN, no
+                    # longer gated behind "running p already looks
+                    # significant" -- that gate was the Tier 2 defect (it
+                    # forced ~100 draws before this could even be attempted
+                    # when count_gte==0, regardless of how far NSL already
+                    # sat from the 1.0 boundary).
+                    iqr_lo, iqr_hi = _conservative_iqr_bound(arr_running, _SEQ_IQR_CONFIDENCE)
+                    null_99th_lo, null_99th_hi = _conservative_quantile_bound(
+                        arr_running, 0.99, _SEQ_IQR_CONFIDENCE
+                    )
+                    # Stability check goes through _nsl_decision_stable (not
+                    # inlined) so it stays independently mockable -- existing
+                    # tests patch this exact name to force "never resolves".
+                    # _nsl_interval_bound is called again just below, only
+                    # when stable, purely to read off WHICH side of 1.0 the
+                    # (already-established) stable interval sits on.
+                    stable = _nsl_decision_stable(
+                        observed_fixable_leakage, null_99th_lo, null_99th_hi, iqr_lo, iqr_hi
+                    )
+
+                    # Tier 2b-final (Addendum 5): asymmetric by design, per
+                    # Besag-Clifford semantics. A stable NOT-DETECTED
+                    # conclusion (NSL provably below 1.0) needs no floor --
+                    # "this isn't a leak" is supportable at low n. A stable
+                    # DETECTED conclusion (NSL provably above 1.0) is NOT
+                    # enough to stop on its own: engine.py's reality gate
+                    # requires p_value < _SEQ_ALPHA before NSL is even
+                    # consulted, and the Laplace-corrected p_value has a hard
+                    # floor of 1/(n+1) that cannot cross alpha before
+                    # _ALPHA_FLOOR_DRAWS draws when count_gte==0 (more, if
+                    # count_gte>0) -- no matter how stable the NSL interval
+                    # already looks. Stopping on NSL stability alone in this
+                    # direction is exactly the bug Addendum 5 recorded: a
+                    # verdict flip from FAIL to UNCONFIRMED_HIGH_DAMAGE on an
+                    # unmistakable leak, purely because p hadn't run long
+                    # enough to be entitled to an opinion.
+                    if stable:
+                        _, nsl_max = _nsl_interval_bound(
+                            observed_fixable_leakage, null_99th_lo, null_99th_hi, iqr_lo, iqr_hi
+                        )
+                        detected_side = nsl_max >= 1.0
+                        if not detected_side:
+                            stop_reason = "decision_stable_not_detected"
+                            _stopped_early = True
+                            break
+                        if n_valid >= _ALPHA_FLOOR_DRAWS:
+                            p_running = (count_gte + 1) / (n_valid + 1)
+                            if p_running < _SEQ_ALPHA:
+                                stop_reason = "decision_stable_detected"
+                                _stopped_early = True
+                                break
+                        # else: NSL already looks like a leak, but the honest
+                        # p-value floor for the CURRENT exceedance count
+                        # hasn't been reached -- keep drawing. Besag-Clifford's
+                        # h=10 rule or the N_MAX backstop resolves it if this
+                        # persists.
 
             if stop_reason == "h_exceedance":
                 _p_value_override = _SEQ_H / len(null_samples)
@@ -770,7 +977,10 @@ def estimate_fixable_leakage_null(
         # Besag-Clifford exact rule (sequential_v1, stopped on h exceedances):
         # p = h / n_drawn. Valid specifically because the stopping rule itself
         # waited for the h-th exceedance -- not the generic Laplace estimator.
+        # count_gte >= _SEQ_H > 0 by construction here, so this is a real
+        # count-backed p-value, never a zero-exceedance floor artifact.
         p_value = _p_value_override
+        p_is_upper_bound = False
     else:
         # Laplace-corrected p-value: (count + 1) / (N + 1).
         # Prevents p = 0.0 when no null sample reaches the observed value (which would
@@ -778,6 +988,10 @@ def estimate_fixable_leakage_null(
         # For N=100: minimum p ≈ 1/101 ≈ 0.0099, consistent with alpha=0.01.
         count_gte = int(np.sum(arr >= observed_fixable_leakage))
         p_value = (count_gte + 1) / (n_draws + 1)
+        # Tier 2b-final: True iff this p_value IS the Laplace floor (zero
+        # null draws reached observed) rather than a count-backed estimate --
+        # see NullResult.p_is_upper_bound and Addendum 5.
+        p_is_upper_bound = count_gte == 0
 
     return NullResult(
         observed=observed_fixable_leakage,
@@ -793,4 +1007,5 @@ def estimate_fixable_leakage_null(
         stopped_early=_stopped_early,
         elapsed_seconds=time.perf_counter() - t0,
         scheme=_scheme,
+        p_is_upper_bound=p_is_upper_bound,
     )
