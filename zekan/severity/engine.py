@@ -30,7 +30,7 @@ from sklearn.metrics import roc_auc_score
 from zekan.config.schema import ZekanConfig
 from zekan.contract.contract_checks import validate_contract
 from zekan.contract.prediction_contract import PredictionContract
-from zekan.severity.metrics import evaluate_folds
+from zekan.severity.metrics import _feature_matrix, evaluate_folds
 from zekan.severity.splitters import random_grouped_folds, temporal_expanding_folds
 
 
@@ -231,6 +231,30 @@ def run_severity_analysis(
     forbidden = set(contract.forbidden_after_prediction) & set(df.columns)
     safe_features = [f for f in all_features if f not in forbidden]
 
+    # ── Efficiency: build the float32 feature matrix + target ONCE per audit ──
+    # (mirrors the Tier 1 X_all/y_all reuse null_baseline.py already does for the
+    # permutation null). eval_a and eval_b both use `all_features` -- same column
+    # set, same row set (rand_folds/temp_folds only differ in which index arrays
+    # each fold uses into this same matrix) -- so both share X_all_full directly.
+    # eval_c uses `safe_features`, a strict order-preserving subset of
+    # all_features (safe_features = [f for f in all_features if f not in
+    # forbidden]), so its matrix is sliced from X_all_full BY POSITION rather
+    # than re-cast from df. Position-based (not boolean-mask) slicing is used
+    # throughout so this generalizes correctly to callers (ablation) that
+    # reorder columns, not just filter them -- column order is NOT
+    # interchangeable for every allowlisted estimator: verified empirically that
+    # RandomForestClassifier's fitted predictions change when input columns are
+    # reordered even with a fixed random_state (index-based feature subsampling
+    # per split), while HistGradientBoostingClassifier's do not. Slicing by an
+    # explicit position list (not a mask) reproduces the exact column order any
+    # feature_cols list specifies, so this is safe for every estimator, not just
+    # the ones that happen to be order-invariant.
+    X_all_full = _feature_matrix(df, all_features)
+    y_all = df[contract.target].to_numpy()
+    _col_pos = {f: i for i, f in enumerate(all_features)}
+    safe_positions = [_col_pos[f] for f in safe_features]
+    X_safe = X_all_full[:, safe_positions]
+
     # ── A: random grouped CV, all features ────────────────────────────────────
     rand_folds = random_grouped_folds(
         df,
@@ -241,7 +265,10 @@ def run_severity_analysis(
         min_pos=policy.min_positive_cases_per_fold,
         min_neg=policy.min_negative_cases_per_fold,
     )
-    eval_a = evaluate_folds(df, all_features, contract.target, rand_folds, model_factory)
+    eval_a = evaluate_folds(
+        df, all_features, contract.target, rand_folds, model_factory,
+        X_all=X_all_full, y_all=y_all,
+    )
     naive_auc = eval_a.mean_auc
 
     # ── Shared temporal folds for B and C ─────────────────────────────────────
@@ -283,13 +310,13 @@ def run_severity_analysis(
     # ── B: temporal CV, all features ──────────────────────────────────────────
     eval_b = evaluate_folds(
         df, all_features, contract.target, temp_folds, model_factory,
-        return_predictions=True,
+        return_predictions=True, X_all=X_all_full, y_all=y_all,
     )
 
     # ── C: temporal CV, forbidden features dropped and retrained ──────────────
     eval_c = evaluate_folds(
         df, safe_features, contract.target, temp_folds, model_factory,
-        return_predictions=True,
+        return_predictions=True, X_all=X_safe, y_all=y_all,
     )
     estimated_deployable_auc = eval_c.mean_auc
 
@@ -360,6 +387,7 @@ def run_severity_analysis(
         feature_attribution = run_ablation(
             df, contract, baseline_auc=naive_auc, folds=temp_folds,
             model_factory=model_factory, n_jobs=n_jobs,
+            all_features=all_features, X_all=X_all_full, y_all=y_all,
         )
 
     total_optimism = naive_auc - estimated_deployable_auc
