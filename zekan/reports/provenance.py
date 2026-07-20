@@ -87,6 +87,7 @@ def build_provenance(
     estimator_random_state: Optional[int],
     null_scheme: str = "spawn_v2",
     null_stopping: str = "fixed_v1",
+    undeclared_screen: str = "univariate_v1",
 ) -> dict:
     """Return a deterministic provenance dict — NO timestamp.
 
@@ -102,6 +103,17 @@ def build_provenance(
         JSON produced before Tier 2 has no null_stopping key at all; `zekan
         diff` treats that absence as "fixed_v1" (never guessed to match the
         other side).
+    undeclared_screen
+        The undeclared-feature screen version (Upgrade 1 step 1e).
+        "univariate_v1" is the current (univariate-AUC-on-temporal-folds,
+        NEAR_CERTAIN-only) screen -- see
+        zekan.detectors.undeclared_feature_probe.SCREEN_VERSION, the single
+        source of truth this default should track.  Additive field, threaded
+        the same way as null_scheme/null_stopping -- JSON produced before
+        Upgrade 1 has no undeclared_screen key at all; `zekan diff` treats
+        that absence as "none" (no screen ran), never guessed to match the
+        other side.  A top-level provenance key (not nested under "seed" --
+        unlike null_scheme/null_stopping, this isn't a seeding concern).
     """
     return {
         "contract_sha256": contract_hash,
@@ -113,6 +125,7 @@ def build_provenance(
             "null_scheme": null_scheme,
             "null_stopping": null_stopping,
         },
+        "undeclared_screen": undeclared_screen,
         "versions": versions,
     }
 

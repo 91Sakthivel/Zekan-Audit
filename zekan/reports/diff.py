@@ -31,6 +31,45 @@ def _null_stopping(d: dict) -> str:
     return seed_block.get("null_stopping") or "fixed_v1"
 
 
+def _undeclared_screen(d: dict) -> str:
+    """Extract the undeclared-feature screen version from a provenance block.
+
+    JSON produced before Upgrade 1 (step 1e) carries no undeclared_screen at
+    all -- that absence is treated as "none" (no screen ran), never guessed
+    to match the other side. Mirrors _null_scheme/_null_stopping's exact
+    pattern. Top-level provenance key (not nested under "seed" -- see
+    build_provenance's own docstring for why).
+    """
+    provenance = d.get("provenance") or {}
+    return provenance.get("undeclared_screen") or "none"
+
+
+def _annotation_identity(ann: dict) -> tuple[Any, Any]:
+    """(issue_type, feature) identity for one structural_annotations entry.
+
+    feature comes from evidence.structural_detail.feature when the detail
+    struct carries one (e.g. NEAR_CERTAIN_UNDECLARED_LEAK) -- None otherwise.
+    Distinguishing by feature (not issue_type alone) matters specifically
+    for NEAR_CERTAIN: the screen flags EVERY feature clearing the absolute
+    criterion, so two artifacts can each carry a NEAR_CERTAIN_UNDECLARED_LEAK
+    annotation for a DIFFERENT feature -- collapsing on issue_type alone
+    would wrongly read that as "unchanged."
+    """
+    issue_type = ann.get("issue_type")
+    detail = (ann.get("evidence") or {}).get("structural_detail") or {}
+    feature = detail.get("feature")
+    return (issue_type, feature)
+
+
+def _annotation_ids(d: dict) -> set[tuple[Any, Any]]:
+    return {_annotation_identity(a) for a in (d.get("structural_annotations") or [])}
+
+
+def _format_annotation_id(identity: tuple[Any, Any]) -> str:
+    issue_type, feature = identity
+    return f"{issue_type} ({feature})" if feature is not None else str(issue_type)
+
+
 def _estimator_identity(d: dict) -> str:
     """Extract the estimator identity from a provenance block.
 
@@ -158,5 +197,23 @@ def diff_reports(old: dict, new: dict) -> dict:
         )
         result["fl_delta"] = None
         result["direction"] = "UNVERIFIABLE_CHANGE"
+
+    screen_old = _undeclared_screen(old)
+    screen_new = _undeclared_screen(new)
+    if screen_old != screen_new:
+        result["undeclared_screen_notice"] = (
+            f"undeclared-feature screen version differs ({screen_old} vs {screen_new}): "
+            "screen scores/panels are not directly comparable across versions; "
+            "fixable_leakage comparison is unaffected."
+        )
+
+    old_ann_ids = _annotation_ids(old)
+    new_ann_ids = _annotation_ids(new)
+    appeared = sorted(_format_annotation_id(i) for i in (new_ann_ids - old_ann_ids))
+    resolved = sorted(_format_annotation_id(i) for i in (old_ann_ids - new_ann_ids))
+    if appeared:
+        result["new_annotations"] = appeared
+    if resolved:
+        result["resolved_annotations"] = resolved
 
     return result

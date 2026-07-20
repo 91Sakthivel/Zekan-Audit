@@ -350,6 +350,17 @@ class NearCertainUndeclaredLeakDetail(_UndeclaredLeakDetailBase):
     scores this high), so there is deliberately no waiver field here.
     """
     kind: Literal["near_certain_undeclared_leak"] = "near_certain_undeclared_leak"
+    name_pattern_score: float
+    # Corroboration only (Upgrade 1 step 1e) -- reuses ablation.py's existing
+    # _name_score/_SUSPICIOUS_PATTERNS machinery verbatim (suspicious
+    # temporal-keyword patterns: final_*, days_to_*, future_*, next_*
+    # prefixes; _after_/_future/_next_period/_lag0/_t0 suffixes). 0.0 or 1.0.
+    # Never gates the finding -- NEAR_CERTAIN already fired on the AUC
+    # criterion alone before this is even computed. NOTE: this does NOT
+    # detect feature-vs-target NAME similarity (e.g. B-3's 'readmitted' vs
+    # 'readmitted_lt30' scores 0.0 here -- verified empirically, see
+    # UPGRADE1_CALIBRATION.md's step-1e read-first notes); it only matches a
+    # fixed list of suspicious keyword shapes.
 
 
 class ProbeFailedDetail(BaseModel):

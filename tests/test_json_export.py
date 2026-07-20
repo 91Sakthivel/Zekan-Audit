@@ -236,6 +236,7 @@ _TOP_LEVEL_KEYS = {
     "schema_version",
     "structural_annotations",
     "summary",
+    "undeclared_feature_panel",  # Upgrade 1 step 1e; None when the screen didn't fire
 }
 
 _TOP_LEVEL_KEYS_EXPORT = _TOP_LEVEL_KEYS - {"gate"}  # gate is CLI-only

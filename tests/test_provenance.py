@@ -177,8 +177,11 @@ def test_read_estimator_random_state_returns_none_on_exception():
 # ── build_provenance ───────────────────────────────────────────────────────────
 
 def test_build_provenance_keys(simple_provenance):
+    # re-baselined: Upgrade 1 step 1e adds undeclared_screen (additive,
+    # top-level -- not nested under "seed", unlike null_scheme/null_stopping).
     assert set(simple_provenance) == {
-        "data_sha256", "contract_sha256", "estimator_identity", "seed", "versions"
+        "data_sha256", "contract_sha256", "estimator_identity", "seed", "versions",
+        "undeclared_screen",
     }
 
 
@@ -298,7 +301,10 @@ def test_audit_json_provenance_has_expected_keys(audit_assets):
     )
     assert result.exit_code == 0, result.output
     prov = json.loads(result.stdout)["provenance"]
-    assert set(prov) == {"data_sha256", "contract_sha256", "estimator_identity", "seed", "versions"}
+    assert set(prov) == {
+        "data_sha256", "contract_sha256", "estimator_identity", "seed", "versions",
+        "undeclared_screen",
+    }
 
 
 def test_audit_json_provenance_no_timestamp(audit_assets):

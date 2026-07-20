@@ -24,6 +24,8 @@ def _artifact(
     null_scheme: str | None = None,
     null_stopping: str | None = None,
     estimator_identity: str | None = None,
+    undeclared_screen: str | None = None,
+    structural_annotations: list | None = None,
 ) -> dict:
     """Minimal schema-1 artifact dict for diff testing.
 
@@ -39,6 +41,16 @@ def _artifact(
     estimator_identity, when given, is set at provenance.estimator_identity
     (top-level of the provenance dict, matching build_provenance's real shape)
     -- Tier 3 Phase C.
+
+    undeclared_screen, when given, is set at provenance.undeclared_screen
+    (top-level of the provenance dict, matching build_provenance's real
+    shape -- Upgrade 1 step 1e). None (default) omits it, matching artifacts
+    predating Upgrade 1.
+
+    structural_annotations, when given, is set directly at the top level
+    (matching verdict_to_dict's real shape -- a bare list of dicts, each
+    shaped like IssueRecord.model_dump(mode="json")). None (default) omits
+    the key entirely, matching diff_reports' own `d.get(...) or []` fallback.
     """
     d: dict = {
         "schema_version": schema_version,
@@ -55,6 +67,10 @@ def _artifact(
         d.setdefault("provenance", {}).setdefault("seed", {})["null_stopping"] = null_stopping
     if estimator_identity is not None:
         d.setdefault("provenance", {})["estimator_identity"] = estimator_identity
+    if undeclared_screen is not None:
+        d.setdefault("provenance", {})["undeclared_screen"] = undeclared_screen
+    if structural_annotations is not None:
+        d["structural_annotations"] = structural_annotations
     return d
 
 
@@ -416,6 +432,122 @@ def test_cli_diff_prints_estimator_identity_notice(tmp_path):
     assert result.exit_code == 0, result.output
     assert "estimator differs" in result.output
     assert "not comparable" in result.output
+
+
+# ── undeclared_screen (Upgrade 1 step 1e) ───────────────────────────────────────
+
+def test_undeclared_screen_differs_sets_notice():
+    old = _artifact(0.0400, undeclared_screen="univariate_v1")
+    new = _artifact(0.0400, undeclared_screen="univariate_v2")
+    d = diff_reports(old, new)
+    assert "undeclared_screen_notice" in d
+    assert "univariate_v1" in d["undeclared_screen_notice"]
+    assert "univariate_v2" in d["undeclared_screen_notice"]
+    assert "not directly comparable" in d["undeclared_screen_notice"]
+
+
+def test_undeclared_screen_same_no_notice():
+    old = _artifact(0.0400, undeclared_screen="univariate_v1")
+    new = _artifact(0.0300, undeclared_screen="univariate_v1")
+    d = diff_reports(old, new)
+    assert "undeclared_screen_notice" not in d
+
+
+def test_undeclared_screen_missing_both_treated_as_none_no_notice():
+    """Two pre-Upgrade-1 artifacts (no provenance at all) -> both default to
+    "none" -> no notice, mirroring null_scheme's exact missing-both pattern."""
+    old = _artifact(0.0400)
+    new = _artifact(0.0300)
+    d = diff_reports(old, new)
+    assert "undeclared_screen_notice" not in d
+
+
+def test_undeclared_screen_missing_on_one_side_sets_notice():
+    old = _artifact(0.0400)  # no provenance at all -> "none"
+    new = _artifact(0.0300, undeclared_screen="univariate_v1")
+    d = diff_reports(old, new)
+    assert "undeclared_screen_notice" in d
+    assert "none" in d["undeclared_screen_notice"]
+    assert "univariate_v1" in d["undeclared_screen_notice"]
+
+
+def test_undeclared_screen_notice_does_not_affect_fl_comparison():
+    old = _artifact(0.2100, verdict="FAIL", undeclared_screen="univariate_v1")
+    new = _artifact(0.0400, verdict="PASS")  # no screen this run
+    d = diff_reports(old, new)
+    assert "undeclared_screen_notice" in d
+    assert d["direction"] == "IMPROVED"
+    assert d["fl_delta"] == pytest.approx(-0.1700)
+
+
+# ── new/resolved structural annotations ─────────────────────────────────────────
+
+def _near_certain_annotation(feature: str) -> dict:
+    """Minimal structural_annotations entry shaped like
+    IssueRecord.model_dump(mode="json") for a NEAR_CERTAIN_UNDECLARED_LEAK
+    finding -- only the fields _annotation_identity actually reads."""
+    return {
+        "issue_type": "near_certain_undeclared_leak",
+        "evidence": {"structural_detail": {"feature": feature}},
+    }
+
+
+def test_new_annotation_appearing_is_surfaced():
+    old = _artifact(0.0400, structural_annotations=[])
+    new = _artifact(0.0400, structural_annotations=[_near_certain_annotation("readmitted")])
+    d = diff_reports(old, new)
+    assert "new_annotations" in d
+    assert any("readmitted" in a for a in d["new_annotations"])
+    assert "resolved_annotations" not in d
+
+
+def test_resolved_annotation_disappearing_is_surfaced():
+    old = _artifact(0.0400, structural_annotations=[_near_certain_annotation("readmitted")])
+    new = _artifact(0.0400, structural_annotations=[])
+    d = diff_reports(old, new)
+    assert "resolved_annotations" in d
+    assert any("readmitted" in a for a in d["resolved_annotations"])
+    assert "new_annotations" not in d
+
+
+def test_unchanged_annotation_not_surfaced_as_new_or_resolved():
+    ann = [_near_certain_annotation("readmitted")]
+    old = _artifact(0.0400, structural_annotations=ann)
+    new = _artifact(0.0300, structural_annotations=ann)
+    d = diff_reports(old, new)
+    assert "new_annotations" not in d
+    assert "resolved_annotations" not in d
+
+
+def test_annotation_identity_distinguishes_same_issue_type_by_feature():
+    """Two NEAR_CERTAIN annotations on DIFFERENT features -- swapping one for
+    another must show up as one new + one resolved, not as "unchanged"
+    (which collapsing on issue_type alone would wrongly report)."""
+    old = _artifact(
+        0.0400, structural_annotations=[_near_certain_annotation("feature_a")]
+    )
+    new = _artifact(
+        0.0400, structural_annotations=[_near_certain_annotation("feature_b")]
+    )
+    d = diff_reports(old, new)
+    assert any("feature_b" in a for a in d["new_annotations"])
+    assert any("feature_a" in a for a in d["resolved_annotations"])
+
+
+def test_cli_diff_prints_new_and_resolved_annotations(tmp_path):
+    a = tmp_path / "old.json"
+    b = tmp_path / "new.json"
+    _write(a, _artifact(0.0400, structural_annotations=[]))
+    _write(
+        b,
+        _artifact(0.0400, structural_annotations=[_near_certain_annotation("readmitted")]),
+    )
+
+    result = runner.invoke(app, ["diff", "--old", str(a), "--new", str(b)])
+
+    assert result.exit_code == 0, result.output
+    assert "New annotation" in result.output
+    assert "readmitted" in result.output
 
 
 # ── CLI tests ─────────────────────────────────────────────────────────────────

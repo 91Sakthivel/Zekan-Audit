@@ -195,6 +195,8 @@ def _run_audit_pipeline(
             err=json_mode,
         )
 
+    from zekan.detectors.undeclared_feature_probe import SCREEN_VERSION as _undeclared_screen_version
+
     _provenance = build_provenance(
         data_hash=hash_dataframe(df),
         contract_hash=hash_contract(cfg.contract),
@@ -204,6 +206,7 @@ def _run_audit_pipeline(
         estimator_random_state=read_estimator_random_state(model_factory),
         null_scheme="spawn_v2",
         null_stopping=_null_stopping_mode,
+        undeclared_screen=_undeclared_screen_version,
     )
     return _report, _provenance
 
@@ -461,6 +464,17 @@ def diff(
 
     if "estimator_identity_notice" in result:
         typer.echo(f"  Note: {result['estimator_identity_notice']}", err=json_output)
+
+    if "undeclared_screen_notice" in result:
+        typer.echo(f"  Note: {result['undeclared_screen_notice']}", err=json_output)
+
+    if "new_annotations" in result:
+        for _ann in result["new_annotations"]:
+            typer.echo(f"  New annotation: {_ann}", err=json_output)
+
+    if "resolved_annotations" in result:
+        for _ann in result["resolved_annotations"]:
+            typer.echo(f"  Resolved annotation: {_ann}", err=json_output)
 
     if fail_on_regression and result["direction"] == "REGRESSED":
         raise typer.Exit(1)

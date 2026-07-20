@@ -48,6 +48,16 @@ class _ProbeSpec:
     needs_model: bool = False    # receives model_factory=, n_jobs=
     needs_matrix: bool = False   # receives X_all=, y_all=, col_pos=
     needs_budget: bool = False   # receives deadline= (monotonic timestamp, or None)
+    needs_side_channel: bool = False
+    # receives side_channel= (Upgrade 1 step 1e). For a probe that has non-issue
+    # output alongside its normal IssueRecords -- e.g. the undeclared-feature
+    # screen's ranked informational panel, which is explicitly NOT an
+    # IssueRecord (no issue is being asserted) and so cannot flow through
+    # _run_structural_probes's IssueRecord-only return list. The probe writes
+    # to the dict it's given (keyed by whatever name it chooses); a probe with
+    # nothing to say via this channel simply doesn't write to it. Kept generic
+    # (like every other capability flag here) rather than named after any one
+    # probe's specific side-data shape.
 
 
 def _build_probe_registry() -> list[_ProbeSpec]:
@@ -61,11 +71,20 @@ def _build_probe_registry() -> list[_ProbeSpec]:
     """
     from zekan.detectors.entity_aggregate_probe import probe_forbidden_entity_level_aggregate
     from zekan.detectors.duplicate_probe import probe_raw_duplicates, probe_cross_fold_duplicates
+    from zekan.detectors.undeclared_feature_probe import probe_undeclared_feature_screen
 
     return [
         _ProbeSpec(fn=probe_forbidden_entity_level_aggregate, needs_folds=False),
         _ProbeSpec(fn=probe_raw_duplicates, needs_folds=False),
         _ProbeSpec(fn=probe_cross_fold_duplicates, needs_folds=True),
+        _ProbeSpec(
+            fn=probe_undeclared_feature_screen,
+            needs_folds=True,      # TEMPORAL folds only -- the pre-registered invariant
+            needs_model=True,      # fits histgb (or the configured estimator) per feature
+            needs_matrix=True,     # slices X_all by column POSITION, never a boolean mask
+            needs_budget=True,     # accepts deadline= for calling-convention parity (unused today)
+            needs_side_channel=True,  # ranked panel is NOT an IssueRecord (Upgrade 1 step 1e)
+        ),
     ]
 
 
@@ -79,9 +98,20 @@ def _run_structural_probes(
     y_all: Optional[Any] = None,
     all_features: Optional[list[str]] = None,
     time_budget_seconds: Optional[float] = None,
+    side_channel: Optional[dict] = None,
 ) -> list:
     """Run all registered structural probes; return non-pass IssueRecords
     (plus a PROBE_FAILED IssueRecord for any probe that raised) only.
+
+    side_channel, when given, is passed through unchanged to any probe
+    declaring needs_side_channel=True (Upgrade 1 step 1e) -- the probe writes
+    non-IssueRecord output into it directly (mutation, no return-shape
+    change here) before returning its normal IssueRecord list. When the probe
+    raises before reaching that write, side_channel simply stays whatever it
+    was -- exception isolation below means a crashed probe never leaves
+    partial/stale side data behind. None (the default) means "no caller wants
+    this" and is passed straight through; a needs_side_channel probe must
+    treat None as "nothing to write to" rather than erroring.
 
     Return type is a plain list to avoid a MODULE-LEVEL import of IssueRecord
     here (would create a module-level import of detectors into the audit
@@ -153,6 +183,8 @@ def _run_structural_probes(
             kwargs["col_pos"] = col_pos
         if spec.needs_budget:
             kwargs["deadline"] = deadline
+        if spec.needs_side_channel:
+            kwargs["side_channel"] = side_channel
 
         try:
             result = spec.fn(df, contract, **kwargs)
@@ -266,13 +298,21 @@ def run_audit(
         min_valid_folds=config.split_policy.min_valid_folds,
     )
 
+    _side_channel: dict = {}
     annotations = _run_structural_probes(
         df, contract, folds=severity_result.folds,
         model_factory=model_factory, n_jobs=n_jobs,
         X_all=severity_result.X_all, y_all=severity_result.y_all,
         all_features=severity_result.all_features,
+        side_channel=_side_channel,
     )
+    _panel = _side_channel.get("undeclared_feature_panel")
+    _updates: dict = {}
     if annotations:
-        report = report.model_copy(update={"structural_annotations": annotations})
+        _updates["structural_annotations"] = annotations
+    if _panel is not None:
+        _updates["undeclared_feature_panel"] = _panel
+    if _updates:
+        report = report.model_copy(update=_updates)
 
     return report

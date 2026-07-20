@@ -92,6 +92,7 @@ def _near_certain_record(**detail_overrides) -> IssueRecord:
     detail_kwargs = dict(
         feature="readmitted", univariate_auc=1.0, threshold_compared_against=0.999,
         n_folds_evaluated=5, screened_count=48, total_features=48,
+        name_pattern_score=0.0,
     )
     detail_kwargs.update(detail_overrides)
     return IssueRecord(
@@ -221,6 +222,7 @@ def test_probe_detail_union_discriminates_new_kinds_from_bare_dict(kind, cls):
             "near_certain_undeclared_leak": dict(
                 feature="f", univariate_auc=1.0, threshold_compared_against=0.999,
                 n_folds_evaluated=5, screened_count=10, total_features=10,
+                name_pattern_score=0.0,
             ),
             "probe_failed": dict(
                 probe_name="p", exception_type="ValueError", message="m",

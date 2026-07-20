@@ -53,6 +53,20 @@ def _summary_headline(report: VerdictReport) -> str:
     return _MSG.TRANSLATION_TRUSTED
 
 
+def _undeclared_feature_panel_dict(report: VerdictReport) -> dict | None:
+    """Hand-serialize undeclared_feature_panel (a plain dataclass, same
+    reason structural_annotations gets manual treatment: the field is typed
+    loosely -- Optional[Any] -- on VerdictReport to avoid a circular import,
+    so Pydantic's automatic model_dump() can't introspect its contents).
+    None when the screen did not run or found nothing to report.
+    """
+    panel = report.undeclared_feature_panel
+    if panel is None:
+        return None
+    import dataclasses
+    return dataclasses.asdict(panel)
+
+
 def verdict_to_dict(report: VerdictReport) -> dict:
     """Serialize a VerdictReport to a JSON-safe dict.
 
@@ -60,10 +74,15 @@ def verdict_to_dict(report: VerdictReport) -> dict:
     - NaN/Inf are coerced to None.
     - numpy scalar types are coerced to Python native.
     - structural_annotations serialized explicitly (bare list — no Pydantic schema).
+    - undeclared_feature_panel serialized explicitly (plain dataclass — no
+      Pydantic schema), same reason as structural_annotations. None when the
+      screen did not run or found nothing to report.
     - feature_attribution stays nested under measured_damage (not hoisted).
     - Every documented top-level key is always present; None when absent.
     """
-    raw = report.model_dump(mode="json", exclude={"structural_annotations"})
+    raw = report.model_dump(
+        mode="json", exclude={"structural_annotations", "undeclared_feature_panel"}
+    )
 
     annotations = [ann.model_dump(mode="json") for ann in report.structural_annotations]
 
@@ -82,6 +101,7 @@ def verdict_to_dict(report: VerdictReport) -> dict:
         "schema_version": "1",
         "structural_annotations": annotations,
         "summary": summary,
+        "undeclared_feature_panel": _undeclared_feature_panel_dict(report),
     }
 
     return _coerce(out)

@@ -32,7 +32,7 @@ Policy floors (policy_decision block only — engine.py is unchanged):
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Any, Optional
 
 import numpy as np
 from scipy.stats import t as _scipy_t
@@ -310,6 +310,25 @@ class VerdictReport(BaseModel):
     between verdict.py and detectors/schema.py.
     """
 
+    undeclared_feature_panel: Optional[Any] = None
+    """Upgrade 1 step 1e -- ranked informational panel from the undeclared-
+    feature screen (ablation.py-adjacent: top-N non-forbidden features by
+    univariate AUC, no threshold, no suspicion claim). NOT an IssueRecord --
+    no issue is asserted; see zekan/detectors/undeclared_feature_probe.py's
+    UndeclaredFeaturePanel for the concrete shape. None when the screen did
+    not run (e.g. no temporal folds) or found nothing to report.
+
+    Typed as Optional[Any] (not the concrete UndeclaredFeaturePanel), same
+    rationale as structural_annotations above: avoids a module-level
+    cross-package import from severity/verdict.py into detectors/. Populated
+    by run_audit() after the verdict is built, via the same probe-registry
+    side-channel mechanism structural_annotations already uses for its
+    exception isolation (audit._run_structural_probes' side_channel param) --
+    a probe that raises mid-computation never leaves a partial/stale panel
+    here; this stays None and PROBE_FAILED surfaces in structural_annotations
+    instead.
+    """
+
     def __str__(self) -> str:
         from zekan.reports.text_view import render_verdict
         return render_verdict(self)
@@ -445,6 +464,7 @@ def _make_unconfirmed_report(
     policy_decision: PolicyDecision,
     fold_ci: FoldCI,
     structural_annotations: list | None = None,
+    undeclared_feature_panel: Any = None,
 ) -> VerdictReport:
     """Canonical UNCONFIRMED_HIGH_DAMAGE report factory.
 
@@ -457,6 +477,7 @@ def _make_unconfirmed_report(
         policy_decision=policy_decision,
         fold_ci=fold_ci,
         structural_annotations=structural_annotations or [],
+        undeclared_feature_panel=undeclared_feature_panel,
     )
 
 
@@ -834,4 +855,5 @@ def _apply_seed_stability(
         policy_decision=_new_pd,
         fold_ci=_unstable_fold_ci,
         structural_annotations=list(primary_report.structural_annotations),
+        undeclared_feature_panel=primary_report.undeclared_feature_panel,
     )
