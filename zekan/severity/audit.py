@@ -16,12 +16,10 @@ The caller never needs to call run_severity_analysis or build_verdict directly.
 from __future__ import annotations
 
 import time
-import traceback
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
 import pandas as pd
-from pydantic import BaseModel
 
 from zekan.config.schema import ZekanConfig
 from zekan.contract.prediction_contract import PredictionContract
@@ -50,32 +48,6 @@ class _ProbeSpec:
     needs_model: bool = False    # receives model_factory=, n_jobs=
     needs_matrix: bool = False   # receives X_all=, y_all=, col_pos=
     needs_budget: bool = False   # receives deadline= (monotonic timestamp, or None)
-
-
-class _ProbeFailure(BaseModel):
-    """Placeholder for a probe that raised during execution (Upgrade 1 step 1b
-    resilience requirement) -- NOT a real IssueRecord.
-
-    Deliberately does NOT use zekan.detectors.schema.IssueType/_REGISTRY: this
-    step is wiring + hardening only ("do NOT invent a registry row in this
-    step" -- that's step 1c's job, once the probes that can actually fail in
-    interesting ways exist). This placeholder is safe to sit inside
-    VerdictReport.structural_annotations today because every current renderer
-    of that list only reads two things: `.what` (zekan/reports/text_view.py,
-    html_view.py -- both do `for ann in annotations: ... ann.what`, nothing
-    else) and `.model_dump()` (zekan/reports/json_export.py, for every entry
-    uniformly) -- both are satisfied here as a plain Pydantic BaseModel with a
-    `what` field.
-
-    1c should replace this with a real PROBE_EXECUTION_FAILED (or similar)
-    IssueType + _REGISTRY row + typed ProbeDetail, wire status/severity/
-    evidence properly, and delete this class.
-    """
-    what: str
-    probe_name: str
-    exception_type: str
-    exception_message: str
-    traceback_text: str
 
 
 def _build_probe_registry() -> list[_ProbeSpec]:
@@ -109,10 +81,13 @@ def _run_structural_probes(
     time_budget_seconds: Optional[float] = None,
 ) -> list:
     """Run all registered structural probes; return non-pass IssueRecords
-    (plus any _ProbeFailure placeholders for probes that raised) only.
+    (plus a PROBE_FAILED IssueRecord for any probe that raised) only.
 
-    Return type is a plain list to avoid importing IssueRecord here (would create
-    a module-level import of detectors into the audit orchestrator).
+    Return type is a plain list to avoid a MODULE-LEVEL import of IssueRecord
+    here (would create a module-level import of detectors into the audit
+    orchestrator); IssueRecord/IssueType are still imported locally, below,
+    the same lazy way _build_probe_registry() already imports the probes
+    themselves.
 
     Probes with needs_folds=True are silently skipped when folds is None --
     unchanged from before 1b. needs_model/needs_matrix/needs_budget probes are
@@ -124,9 +99,10 @@ def _run_structural_probes(
 
     Each probe may return either a list[IssueRecord] or a single IssueRecord;
     both are handled uniformly. A probe that raises is isolated -- caught here,
-    turned into a _ProbeFailure record naming the probe and the exception, and
-    the remaining probes still run. One probe's bug can never take down the
-    whole audit.
+    turned into a registered PROBE_FAILED IssueRecord naming the probe and the
+    exception (Upgrade 1 step 1c; step 1b's _ProbeFailure placeholder is
+    retired), and the remaining probes still run. One probe's bug can never
+    take down the whole audit.
 
     col_pos (feature name -> column position in `all_features`/`X_all`) is
     built once here, by POSITION not by any implicit column-name matching, so
@@ -144,6 +120,8 @@ def _run_structural_probes(
     to completion. The mechanism is wired now, ahead of any probe using it,
     per UPGRADE1_PREREGISTRATION.md's resilience requirements.
     """
+    from zekan.detectors.schema import Evidence, IssueRecord, IssueType, ProbeFailedDetail
+
     _PROBES = _build_probe_registry()
 
     col_pos = {f: i for i, f in enumerate(all_features)} if all_features is not None else {}
@@ -180,20 +158,32 @@ def _run_structural_probes(
             result = spec.fn(df, contract, **kwargs)
         except Exception as exc:  # noqa: BLE001 -- isolation is the point; any probe, any exception
             probe_name = getattr(spec.fn, "__name__", repr(spec.fn))
-            found.append(_ProbeFailure(
+            message = str(exc) or repr(exc)
+            found.append(IssueRecord(
+                issue_type=IssueType.PROBE_FAILED,
+                status="internal_fail",
                 what=(
                     f"Structural probe '{probe_name}' failed to run "
-                    f"({type(exc).__name__}: {exc}) -- this finding was skipped, "
+                    f"({type(exc).__name__}: {message}) -- this finding was skipped, "
                     "not a data property that was checked and found clean."
                 ),
-                probe_name=probe_name,
-                exception_type=type(exc).__name__,
-                exception_message=str(exc) or repr(exc),
-                # Captured in the record itself rather than routed to a logger --
-                # this project has no logging convention yet, and inventing one
-                # is out of scope for this step. Not rendered in text/HTML today
-                # (only `.what` is), but present in the JSON for 1c to build on.
-                traceback_text=traceback.format_exc(),
+                why=(
+                    "A probe that cannot run means one structural-risk category went "
+                    "unchecked this audit -- not that no risk exists there, only that "
+                    "this run has no evidence either way for it."
+                ),
+                how_much=f"{type(exc).__name__}: {message}",
+                next_fix=(
+                    "This is an internal Zekan error, not a data problem -- report it "
+                    "(probe name, exception type, message) so the probe can be fixed. "
+                    "The rest of this audit (detection, damage, policy) is unaffected: "
+                    "structural probes are annotate-only."
+                ),
+                evidence=Evidence(structural_detail=ProbeFailedDetail(
+                    probe_name=probe_name,
+                    exception_type=type(exc).__name__,
+                    message=message,
+                )),
             ))
             continue
 

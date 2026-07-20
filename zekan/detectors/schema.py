@@ -79,8 +79,19 @@ class IssueType(str, Enum):
     WRONG_SPLIT_STRATEGY = "wrong_split_strategy"
     # Structural aggregate probe
     FORBIDDEN_ENTITY_LEVEL_AGGREGATE = "forbidden_entity_level_aggregate"
+    # Upgrade 1: undeclared-feature screen (univariate AUC, annotate-only).
+    # Both tiers are FLAGGED_SUSPICIOUS/confirmed=False -- a univariate score is
+    # suggestive, not a confirmed statistical gate the way the permutation-null
+    # backed TEMPORAL_LEAKAGE is. See UPGRADE1_PREREGISTRATION.md.
+    SUSPECTED_UNDECLARED_LEAK = "suspected_undeclared_leak"
+    NEAR_CERTAIN_UNDECLARED_LEAK = "near_certain_undeclared_leak"
     # Internal integrity self-check (Zekan's own splitter, not a user finding)
     SPLITTER_CONTRACT_VIOLATION = "splitter_contract_violation"
+    # Internal integrity self-check: a structural probe raised during execution
+    # and was isolated (audit._run_structural_probes) rather than propagating.
+    # Zekan reporting its own failure, not a finding about the user's data --
+    # same category as SPLITTER_CONTRACT_VIOLATION.
+    PROBE_FAILED = "probe_failed"
     # v1.1 scope (emitted as OUT_OF_SCOPE for coverage-matrix transparency)
     CODE_STRUCTURAL_LEAK = "code_structural_leak"
 
@@ -175,7 +186,30 @@ _REGISTRY: dict[IssueType, _IssueClass] = {
     IssueType.ENTITY_CONTAMINATION_RISK: _IssueClass(SourceLayer.DETECTED_STRUCTURAL, IssueSeverity.HIGH,     EvidenceScope.DATA_ONLY,       ImpactType.STRUCTURAL_RISK,   False),
     IssueType.WRONG_SPLIT_STRATEGY:                  _IssueClass(SourceLayer.DETECTED_STRUCTURAL, IssueSeverity.HIGH,     EvidenceScope.DATA_ONLY,       ImpactType.STRUCTURAL_RISK,   True),
     IssueType.FORBIDDEN_ENTITY_LEVEL_AGGREGATE:      _IssueClass(SourceLayer.DETECTED_STRUCTURAL, IssueSeverity.HIGH,     EvidenceScope.DATA_ONLY,       ImpactType.STRUCTURAL_RISK,   True),
+    # Upgrade 1 -- both mirror CORRELATED_LEAK_PAIR on source_layer/evidence_scope/
+    # impact_type/confirmed: same mechanism (fits a model via the engine's own
+    # evaluation harness, produces a suggestive not causally-confirmed AUC-based
+    # signal). Differ only on severity, mirroring how ENTITY_CONTAMINATION sits
+    # above ENTITY_CONTAMINATION_RISK -- NEAR_CERTAIN is HIGH, not CRITICAL:
+    # CRITICAL is reserved for silent-corruption-class findings (see the class
+    # docstring above); an undeclared-leak flag is loud and annotate-only, it
+    # never silently corrupts engine_detection/measured_damage/policy_decision.
+    IssueType.SUSPECTED_UNDECLARED_LEAK:              _IssueClass(SourceLayer.FLAGGED_SUSPICIOUS, IssueSeverity.MEDIUM,   EvidenceScope.ENGINE_MEASURED, ImpactType.HEURISTIC,         False),
+    IssueType.NEAR_CERTAIN_UNDECLARED_LEAK:           _IssueClass(SourceLayer.FLAGGED_SUSPICIOUS, IssueSeverity.HIGH,     EvidenceScope.ENGINE_MEASURED, ImpactType.HEURISTIC,         False),
     IssueType.SPLITTER_CONTRACT_VIOLATION:           _IssueClass(SourceLayer.ZEKAN_INTEGRITY,    IssueSeverity.CRITICAL, EvidenceScope.SELF_CHECK,      ImpactType.MEASUREMENT_ERROR, True),
+    # Mirrors SPLITTER_CONTRACT_VIOLATION on source_layer (ZEKAN_INTEGRITY --
+    # this is Zekan reporting its own execution failure, not a user-data
+    # finding) and evidence_scope (SELF_CHECK) and confirmed (True -- "this
+    # probe raised this exact exception" is a deterministic fact, not a
+    # heuristic or an advisory). Diverges on severity (HIGH, not CRITICAL --
+    # a probe crash is loud, isolated, and annotate-only; it never silently
+    # corrupts another measurement the way an undetected splitter contract
+    # violation would, so it doesn't earn CRITICAL's reserved meaning) and on
+    # impact_type (STRUCTURAL_RISK, not MEASUREMENT_ERROR -- a probe crash
+    # doesn't touch engine-computed performance numbers at all; it means a
+    # structural-risk check didn't run this time, the same impact_type every
+    # other structural-risk probe in this registry already uses).
+    IssueType.PROBE_FAILED:                           _IssueClass(SourceLayer.ZEKAN_INTEGRITY,    IssueSeverity.HIGH,     EvidenceScope.SELF_CHECK,      ImpactType.STRUCTURAL_RISK,   True),
     IssueType.CODE_STRUCTURAL_LEAK:                  _IssueClass(SourceLayer.OUT_OF_SCOPE,        IssueSeverity.HIGH,     EvidenceScope.CODE_ANALYSIS,   ImpactType.STRUCTURAL_RISK,   True),
     # fmt: on
 }
@@ -275,6 +309,68 @@ class ForbiddenEntityLevelAggregateDetail(BaseModel):
     verdict_effect: str                 # always "annotate_only"
 
 
+class _UndeclaredLeakDetailBase(BaseModel):
+    """Shared fields between SuspectedUndeclaredLeakDetail and
+    NearCertainUndeclaredLeakDetail (Upgrade 1 -- the undeclared-feature
+    screen; see UPGRADE1_PREREGISTRATION.md). NOT itself a ProbeDetail Union
+    member -- only the two concrete subclasses below are. Introduced purely to
+    avoid duplicating six field definitions across two closely related
+    structs; `kind` stays a fixed, per-subclass Literal on each concrete
+    class (never a field defined here), so the discriminator can never
+    disagree with which subclass -- and therefore which IssueType -- a record
+    actually carries.
+    """
+    feature: str                        # the non-forbidden feature that was scored
+    univariate_auc: float               # measured univariate AUC on temporal folds
+    threshold_compared_against: float   # the calibrated threshold this score was judged against
+    n_folds_evaluated: int              # temporal folds actually used for this feature's score
+    screened_count: int                 # features screened this run ("screened X of Y")
+    total_features: int                 # Y in "screened X of Y"
+
+
+class SuspectedUndeclaredLeakDetail(_UndeclaredLeakDetailBase):
+    """Evidence for SUSPECTED_UNDECLARED_LEAK: a non-forbidden feature's
+    univariate AUC clears the Benjamini-Hochberg FDR-controlled threshold.
+    Suggestive, not confirmed -- confirmed=False in the registry.
+    """
+    kind: Literal["suspected_undeclared_leak"] = "suspected_undeclared_leak"
+    suppressed_by_known_strong_features: bool
+    # True when this feature is named in the contract's known_strong_features
+    # allowlist: the record still fires (coverage-matrix completeness -- every
+    # screened feature gets a record) but with status="pass" instead of a live
+    # flag, per UPGRADE1_PREREGISTRATION.md. False for every genuinely-flagged
+    # SUSPECTED record.
+
+
+class NearCertainUndeclaredLeakDetail(_UndeclaredLeakDetailBase):
+    """Evidence for NEAR_CERTAIN_UNDECLARED_LEAK: a non-forbidden feature's
+    univariate AUC clears the absolute (non-FDR, non-percentile) near-1.0
+    criterion -- the regime where the feature is functionally a copy of the
+    target. Never suppressible by known_strong_features (nothing legitimate
+    scores this high), so there is deliberately no waiver field here.
+    """
+    kind: Literal["near_certain_undeclared_leak"] = "near_certain_undeclared_leak"
+
+
+class ProbeFailedDetail(BaseModel):
+    """Evidence for PROBE_FAILED: a structural probe raised during execution
+    and was isolated (audit._run_structural_probes) rather than propagating.
+    This is Zekan reporting its own execution failure, not a finding about
+    the user's data -- see SplitterContractViolationDetail for the same
+    distinction.
+
+    Deliberately no raw-traceback field: no existing detail struct in this
+    schema carries an unstructured diagnostic blob (this schema's own stated
+    principle is against exactly this "Case-4-pattern" free-text soft
+    contract -- see the module docstring), so this stays with short,
+    structured fields only, matching every other detail struct here.
+    """
+    kind: Literal["probe_failed"] = "probe_failed"
+    probe_name: str
+    exception_type: str
+    message: str
+
+
 ProbeDetail = Annotated[
     Union[
         RowDuplicationDetail,
@@ -285,6 +381,9 @@ ProbeDetail = Annotated[
         CorrelatedLeakPairDetail,
         SplitterContractViolationDetail,
         ForbiddenEntityLevelAggregateDetail,
+        SuspectedUndeclaredLeakDetail,
+        NearCertainUndeclaredLeakDetail,
+        ProbeFailedDetail,
     ],
     Field(discriminator="kind"),
 ]

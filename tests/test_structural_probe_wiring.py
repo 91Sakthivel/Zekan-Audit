@@ -1,17 +1,19 @@
-"""Tests for Upgrade 1 step 1b: the widened structural-probe calling convention.
+"""Tests for Upgrade 1 steps 1b/1c: the widened structural-probe calling
+convention and its exception-isolation guarantee.
 
-Covers _run_structural_probes's new capability flags (needs_model, needs_matrix,
-needs_budget), the exception-isolation guarantee, and that the three currently
-registered probes are unaffected (backward compatibility -- their own dedicated
-test files, e.g. test_entity_aggregate_probe.py, cover their actual behavior;
-this file is about the calling convention around them, not the probes
-themselves).
+Covers _run_structural_probes's capability flags (needs_model, needs_matrix,
+needs_budget), exception isolation (now producing a registered PROBE_FAILED
+IssueRecord as of step 1c -- 1b's duck-typed _ProbeFailure placeholder was
+retired), and that the three currently registered probes are unaffected
+(backward compatibility -- their own dedicated test files, e.g.
+test_entity_aggregate_probe.py, cover their actual behavior; this file is
+about the calling convention around them, not the probes themselves).
 
 Fake probes are injected via mock.patch("zekan.severity.audit._build_probe_registry",
 ...) -- the registry-construction seam step 1b introduced specifically so the
 needs_model/needs_matrix/needs_budget/exception-isolation wiring could be
 exercised directly without a real model-fitting probe existing yet (that's
-step 1c).
+step 1e).
 """
 
 from __future__ import annotations
@@ -24,8 +26,8 @@ import pandas as pd
 import pytest
 
 from zekan.contract.prediction_contract import PredictionContract
-from zekan.detectors.schema import IssueRecord, IssueType
-from zekan.severity.audit import _ProbeFailure, _ProbeSpec, _run_structural_probes
+from zekan.detectors.schema import Evidence, IssueRecord, IssueType, ProbeFailedDetail
+from zekan.severity.audit import _ProbeSpec, _run_structural_probes
 
 
 def _contract(forbidden=None) -> PredictionContract:
@@ -188,6 +190,10 @@ def test_needs_budget_probe_receives_none_when_no_budget_given():
 
 
 # ── Exception isolation ──────────────────────────────────────────────────────
+# Step 1c: a probe that raises now produces a REGISTERED IssueType.PROBE_FAILED
+# IssueRecord (source_layer=ZEKAN_INTEGRITY, status="internal_fail", confirmed=
+# True -- see schema.py's _REGISTRY row and its reasoning comment), not the
+# step-1b duck-typed _ProbeFailure placeholder.
 
 def test_probe_exception_is_isolated_and_surfaced():
     def _raising_probe(df, contract):
@@ -199,12 +205,20 @@ def test_probe_exception_is_isolated_and_surfaced():
 
     assert len(result) == 1
     failure = result[0]
-    assert isinstance(failure, _ProbeFailure)
-    assert failure.probe_name == "_raising_probe"
-    assert failure.exception_type == "ValueError"
-    assert "synthetic failure for test coverage" in failure.exception_message
+    assert isinstance(failure, IssueRecord)
+    assert failure.issue_type == IssueType.PROBE_FAILED
+    assert failure.status == "internal_fail"
+    # Computed fields correctly derived from the registry, not hand-set.
+    assert failure.source_layer.value == "zekan_integrity"
+    assert failure.severity.value == "high"
+    assert failure.confirmed is True
+
+    detail = failure.evidence.structural_detail
+    assert isinstance(detail, ProbeFailedDetail)
+    assert detail.probe_name == "_raising_probe"
+    assert detail.exception_type == "ValueError"
+    assert "synthetic failure for test coverage" in detail.message
     assert "synthetic failure for test coverage" in failure.what
-    assert "Traceback" in failure.traceback_text
 
 
 def test_one_probe_raising_does_not_stop_other_probes_from_running():
@@ -226,12 +240,12 @@ def test_one_probe_raising_does_not_stop_other_probes_from_running():
     # did not prevent the second from executing.
     assert calls == ["raising", "ok"]
     # _ok_probe returns status="pass" so it contributes nothing to `found`;
-    # only the failure placeholder appears -- critically, nothing propagated.
+    # only the failure record appears -- critically, nothing propagated.
     assert len(result) == 1
-    assert isinstance(result[0], _ProbeFailure)
+    assert result[0].issue_type == IssueType.PROBE_FAILED
 
 
-def test_probe_failure_placeholder_survives_json_export_and_text_render():
+def test_probe_failed_record_survives_json_export_and_text_render():
     """The exact resilience claim: a probe raising must never crash the
     surfaces that consume structural_annotations (JSON export, text render)."""
     from zekan.reports.json_export import verdict_to_dict
@@ -240,10 +254,16 @@ def test_probe_failure_placeholder_survives_json_export_and_text_render():
         PolicyDecision, VerdictReport,
     )
 
-    failure = _ProbeFailure(
+    failure = IssueRecord(
+        issue_type=IssueType.PROBE_FAILED,
+        status="internal_fail",
         what="Structural probe 'x' failed to run (ValueError: boom).",
-        probe_name="x", exception_type="ValueError", exception_message="boom",
-        traceback_text="Traceback (most recent call last):\n...",
+        why="A probe that cannot run means one structural-risk category went unchecked.",
+        how_much="ValueError: boom",
+        next_fix="Report it so the probe can be fixed.",
+        evidence=Evidence(structural_detail=ProbeFailedDetail(
+            probe_name="x", exception_type="ValueError", message="boom",
+        )),
     )
     report = VerdictReport(
         engine_detection=EngineDetection(
@@ -275,6 +295,8 @@ def test_probe_failure_placeholder_survives_json_export_and_text_render():
 
     d = verdict_to_dict(report)
     assert any(a.get("what") == failure.what for a in d["structural_annotations"])
+    # The registered record round-trips its typed detail too, not just `what`.
+    assert d["structural_annotations"][0]["evidence"]["structural_detail"]["kind"] == "probe_failed"
 
     text = str(report)
     assert failure.what in text
@@ -297,4 +319,7 @@ def test_run_audit_still_returns_a_verdict_when_a_probe_raises():
         report = run_audit(df, contract, ZekanConfig(contract=contract), n_permutations=0)
 
     assert isinstance(report, VerdictReport)
-    assert any(isinstance(a, _ProbeFailure) for a in report.structural_annotations)
+    assert any(
+        isinstance(a, IssueRecord) and a.issue_type == IssueType.PROBE_FAILED
+        for a in report.structural_annotations
+    )
