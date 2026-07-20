@@ -456,6 +456,9 @@ def diff(
     if "null_scheme_notice" in result:
         typer.echo(f"  Note: {result['null_scheme_notice']}", err=json_output)
 
+    if "null_stopping_notice" in result:
+        typer.echo(f"  Note: {result['null_stopping_notice']}", err=json_output)
+
     if "estimator_identity_notice" in result:
         typer.echo(f"  Note: {result['estimator_identity_notice']}", err=json_output)
 

@@ -103,6 +103,17 @@ class SeverityResult:
     p_is_upper_bound_across: bool = False
     feature_attribution: Optional[Any] = None     # AblationSummary when ablation ran; None otherwise
     folds: list = field(default_factory=list)     # temporal FoldIndices used for B/C eval; internal only
+    # Upgrade 1 step 1b -- additive; internal only, same as `folds` above. The
+    # float32 all-features matrix + target array this run already built once
+    # (this session's matrix-hoist work), exposed so a structural probe that
+    # declares needs_matrix=True (audit._run_structural_probes) can slice a
+    # column by POSITION instead of re-deriving the cast from df. all_features
+    # gives the column order X_all's columns are in -- never assume any other
+    # order. None only for the status="unavailable" early-return path, where
+    # no matrix was ever built.
+    all_features: Optional[list[str]] = None
+    X_all: Optional[np.ndarray] = None
+    y_all: Optional[np.ndarray] = None
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -506,6 +517,9 @@ def run_severity_analysis(
         p_is_upper_bound_across=p_is_upper_bound_across,
         feature_attribution=feature_attribution,
         folds=temp_folds,
+        all_features=all_features,
+        X_all=X_all_full,
+        y_all=y_all,
     )
 
 

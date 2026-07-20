@@ -22,6 +22,7 @@ def _artifact(
     top_feature=None,
     schema_version: str = "1",
     null_scheme: str | None = None,
+    null_stopping: str | None = None,
     estimator_identity: str | None = None,
 ) -> dict:
     """Minimal schema-1 artifact dict for diff testing.
@@ -29,6 +30,11 @@ def _artifact(
     null_scheme, when given, is nested under provenance.seed.null_scheme,
     mirroring build_provenance's real shape (F2a).  None (default) omits
     "provenance" entirely, matching artifacts predating F2a.
+
+    null_stopping, when given, is nested under provenance.seed.null_stopping,
+    mirroring build_provenance's real shape (Tier 2). None (default) omits
+    it, matching artifacts predating Tier 2. Mirrors null_scheme's pattern
+    exactly.
 
     estimator_identity, when given, is set at provenance.estimator_identity
     (top-level of the provenance dict, matching build_provenance's real shape)
@@ -44,7 +50,9 @@ def _artifact(
         },
     }
     if null_scheme is not None:
-        d["provenance"] = {"seed": {"null_scheme": null_scheme}}
+        d.setdefault("provenance", {}).setdefault("seed", {})["null_scheme"] = null_scheme
+    if null_stopping is not None:
+        d.setdefault("provenance", {}).setdefault("seed", {})["null_stopping"] = null_stopping
     if estimator_identity is not None:
         d.setdefault("provenance", {})["estimator_identity"] = estimator_identity
     return d
@@ -282,6 +290,75 @@ def test_cli_diff_fail_on_regression_still_fires_on_real_regression_across_schem
     ])
 
     assert result.exit_code == 1
+
+
+# ── Tier 2: null-stopping guard ──────────────────────────────────────────────
+# Mirrors the F2a null-scheme guard section above exactly: fixable_leakage does
+# not depend on the stopping scheme (fixed_v1 vs sequential_v1), so a stopping
+# difference must never suppress or alter the fl comparison -- only add a
+# notice. This coverage and the CLI wiring below were a pre-existing gap
+# (Tier 2b-final left null_stopping_notice computed in diff_reports but never
+# tested or rendered) -- fixed here as debt cleanup alongside Upgrade 1 1b.
+
+def test_null_stopping_differs_sets_notice():
+    old = _artifact(0.0400, null_stopping="fixed_v1")
+    new = _artifact(0.0400, null_stopping="sequential_v1")
+    d = diff_reports(old, new)
+    assert "null_stopping_notice" in d
+    assert "fixed_v1" in d["null_stopping_notice"]
+    assert "sequential_v1" in d["null_stopping_notice"]
+    assert "not directly comparable" in d["null_stopping_notice"]
+
+
+def test_null_stopping_same_no_notice():
+    old = _artifact(0.0400, null_stopping="sequential_v1")
+    new = _artifact(0.0300, null_stopping="sequential_v1")
+    d = diff_reports(old, new)
+    assert "null_stopping_notice" not in d
+
+
+def test_null_stopping_missing_both_treated_as_fixed_v1_no_notice():
+    """Two pre-Tier-2 artifacts (no provenance at all) -> both default to
+    fixed_v1 -> stopping schemes match -> no notice."""
+    old = _artifact(0.0400)
+    new = _artifact(0.0300)
+    d = diff_reports(old, new)
+    assert "null_stopping_notice" not in d
+
+
+def test_null_stopping_missing_on_one_side_sets_notice():
+    """Old artifact predates Tier 2 (no null_stopping) -> treated as
+    fixed_v1; new is sequential_v1 -> stopping schemes differ -> notice fires."""
+    old = _artifact(0.0400)  # no provenance at all
+    new = _artifact(0.0300, null_stopping="sequential_v1")
+    d = diff_reports(old, new)
+    assert "null_stopping_notice" in d
+    assert "fixed_v1" in d["null_stopping_notice"]
+    assert "sequential_v1" in d["null_stopping_notice"]
+
+
+def test_null_stopping_notice_does_not_affect_fl_comparison():
+    """A stopping-scheme difference must not change direction/fl_delta -- fl
+    doesn't depend on how many permutations were drawn or how."""
+    old = _artifact(0.2100, verdict="FAIL", null_stopping="fixed_v1")
+    new = _artifact(0.0400, verdict="PASS", null_stopping="sequential_v1")
+    d = diff_reports(old, new)
+    assert "null_stopping_notice" in d
+    assert d["direction"] == "IMPROVED"
+    assert d["fl_delta"] == pytest.approx(-0.1700)
+
+
+def test_cli_diff_prints_null_stopping_notice(tmp_path):
+    a = tmp_path / "old.json"
+    b = tmp_path / "new.json"
+    _write(a, _artifact(0.0400, null_stopping="fixed_v1"))
+    _write(b, _artifact(0.0300, null_stopping="sequential_v1"))
+
+    result = runner.invoke(app, ["diff", "--old", str(a), "--new", str(b)])
+
+    assert result.exit_code == 0, result.output
+    assert "null stopping scheme differs" in result.output
+    assert "not directly comparable" in result.output
 
 
 # ── Tier 3 Phase C: estimator-identity guard ─────────────────────────────────
