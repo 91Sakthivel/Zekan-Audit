@@ -548,3 +548,85 @@ a 100k-row frame.
   no test drives an exception through
   `probe_undeclared_feature_screen` itself to confirm it degrades the same
   way.
+
+## Correction (2026-07-21) — the 1g B-2 cost figure was wrong
+
+**The 1458s / ~2.6x figure in "Measured cost correction" above is incorrect
+and must not be used.** This section does not edit that finding — it stands
+above, unmodified, per this project's own append-only-correction convention
+(`TIER2B_CALIBRATION.md`'s Addendum 5 recorded the same way: the original
+entry is left as written, and the correction is appended beneath it).
+
+**Corrected measurement**: a clean re-run of the identical command against
+the identical 101,766-row B-2 frame, with nothing else running on the
+machine, measured **391.77s** wall-clock (artifact: `scratch/cost_B2_rerun.json`;
+start/end log-mtime delta on the companion `scratch/cost_B2_rerun.log`
+corroborates this loosely at ~388s). **391.77s is ~30% faster than the 557s
+pre-screen baseline**, not 2.6x slower — the screen introduces **no
+measurable regression at full scale**. This is also the only outcome
+consistent with the rest of the 1g evidence: B-1 and B-3 both completed in
+~55s each in the same session, and a ~900s marginal screen cost is
+arithmetically impossible to reconcile with that — a data point that should
+have been caught as implausible before the original figure was recorded.
+391.77s is, instead, consistent with the matrix-hoist gain (~380s predicted)
+carrying through to the full B-2 frame once nothing else was contending for
+the machine.
+
+**Likely cause (stated as probable, not certain)**: the original 1g B-2 run
+was very likely concurrent with other Python workloads in that session —
+full-suite pytest attempts running alongside it, compounded by this
+environment's separately-documented behavior of silently spawning a
+duplicate Anaconda-install interpreter alongside every venv Python launch.
+The 1458s figure most plausibly reflects CPU/core contention between those
+processes, not the screen's own cost.
+
+**Methodological lesson, stated plainly**: the original 1458s figure was
+derived from log-file start/end mtimes captured during a session with other
+heavy processes running concurrently — it was never a controlled,
+isolated measurement, and it should not have been presented as one. Going
+forward, wall-clock timings intended for the evidence record must be taken
+with nothing else running on the machine before being recorded — an mtime
+delta from a shared, busy session is not a substitute for a clean, isolated
+timing run.
+
+**What this correction does NOT change**: the screen's own isolated cost
+profile, measured separately in the step-1h cost investigation, still
+stands as measured and is unaffected by this correction — 48 features × 5
+folds = 240 fits on the B-2 10k frame, with 99.9% of the screen's own
+wall-clock time spent in the per-feature fit loop (22.247s of 22.258s
+total, `scratch/1h_profile_screen.py` / `scratch/1h_profile.log`). That
+measurement was already isolated and controlled and needs no correction.
+
+### Cost-investigation findings retained as evidence
+
+Two findings from the step-1h cost investigation are recorded here
+permanently, independent of the 1458s correction above, since they bear on
+any future wide-data or performance work on this screen:
+
+- **The Pearson pre-rank is unsafe as a gatekeeper.** On the B-2 10k frame,
+  `diag_1` ranks **#3 of 48 by univariate AUC** (0.5362, a genuinely
+  predictive categorical/ordinal diagnosis code — see the B-2 10k table
+  above) but only **#23 of 48 by absolute Pearson correlation** (0.0076)
+  against the same target. `_pre_rank` (`undeclared_feature_probe.py:207-219`)
+  selects candidates for full scoring by Pearson correlation alone whenever
+  `WIDE_DATA_CAP` is exceeded (`undeclared_feature_probe.py:104`, currently
+  50). Lowering that cap enough to engage the pre-rank on frames this size
+  would silently drop `diag_1` — a real, meaningfully predictive feature —
+  before it was ever scored. That is the exact failure mode
+  (`UPGRADE1_PREREGISTRATION.md`'s own motivation) this screen exists to
+  prevent, self-inflicted by the optimization. Any future wide-data work on
+  this screen needs a rank/AUC-aware pre-rank, not a linear-correlation one.
+- **Per-feature early exit on the `NEAR_CERTAIN` criterion is
+  architecturally blocked, not just costly to build.** `NEAR_CERTAIN`
+  (`undeclared_feature_probe.py:414`, every fold ≥ `NEAR_CERTAIN_AUC_FLOOR`)
+  and the ranked panel (`univariate_auc=mean_auc` at
+  `undeclared_feature_probe.py:408-413`) are two readings of the **same**
+  per-feature fit stream (`_score_one_feature` → one `evaluate_folds` call
+  per feature, `undeclared_feature_probe.py:237-238`). Exiting early on a
+  feature's first sub-floor fold to save `NEAR_CERTAIN` fits would leave the
+  panel with only that feature's single-fold AUC instead of the mean across
+  all evaluated folds — and on a frame with no near-certain leak (the common
+  case), every panel entry would degrade this way, in exactly the scenario
+  where the panel is the only output the screen actually produces. Cutting
+  fits for one consumer cannot be done without degrading the other under the
+  current one-fit-stream design.
