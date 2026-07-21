@@ -83,6 +83,16 @@ _S_NEAR_CERTAIN_HEADING = (
 _S_NEAR_CERTAIN_LEAD = "margin:0 0 6px;font-size:0.92em;color:#1a1a1a;"
 _S_NEAR_CERTAIN_ACTION = "margin:0;font-size:0.85em;color:#374151;"
 
+# Upgrade H -- NEAR_BIJECTION prominent box. Same treatment as NEAR_CERTAIN's
+# box above (at least equal prominence: confirmed=True is the stronger
+# claim), styled identically so neither reads as more or less important than
+# the other on its own.
+_S_NEAR_BIJECTION_BOX = _S_NEAR_CERTAIN_BOX
+_S_NEAR_BIJECTION_HEADING = _S_NEAR_CERTAIN_HEADING
+_S_NEAR_BIJECTION_LEAD = _S_NEAR_CERTAIN_LEAD
+_S_NEAR_BIJECTION_CORROBORATION = "margin:0 0 6px;font-size:0.85em;color:#374151;font-style:italic;"
+_S_NEAR_BIJECTION_ACTION = _S_NEAR_CERTAIN_ACTION
+
 # Ranked panel -- informational styling, deliberately unalarming (reuses the
 # existing muted/section/list styles above; no red/amber, no threshold look).
 _S_PANEL_MUTED = "font-size:0.85em;color:#6b7280;margin:2px 0 8px;"
@@ -96,10 +106,15 @@ def render_verdict_html(report: VerdictReport) -> str:
     fl = report.measured_damage.fixable_leakage
     attribution = report.measured_damage.feature_attribution
     panel = report.undeclared_feature_panel
-    near_certain, annotations = _split_near_certain(report.structural_annotations)
+    near_certain, near_bijection, annotations = _split_structural_prominent(
+        report.structural_annotations
+    )
 
     if verdict in ("PASS", "NOTE"):
-        return _html_trusted(annotations=annotations, near_certain=near_certain, panel=panel)
+        return _html_trusted(
+            annotations=annotations, near_certain=near_certain,
+            near_bijection=near_bijection, panel=panel,
+        )
     if verdict == "WARN":
         return _html_actionable(
             banner_style=_AMBER,
@@ -110,6 +125,7 @@ def render_verdict_html(report: VerdictReport) -> str:
             attribution=attribution,
             annotations=annotations,
             near_certain=near_certain,
+            near_bijection=near_bijection,
             panel=panel,
         )
     if verdict == "FAIL":
@@ -122,6 +138,7 @@ def render_verdict_html(report: VerdictReport) -> str:
             attribution=attribution,
             annotations=annotations,
             near_certain=near_certain,
+            near_bijection=near_bijection,
             panel=panel,
         )
     if verdict == "UNCONFIRMED_HIGH_DAMAGE":
@@ -130,24 +147,30 @@ def render_verdict_html(report: VerdictReport) -> str:
             attribution=attribution,
             annotations=annotations,
             near_certain=near_certain,
+            near_bijection=near_bijection,
             panel=panel,
         )
-    return _html_trusted(annotations=annotations, near_certain=near_certain, panel=panel)
+    return _html_trusted(
+        annotations=annotations, near_certain=near_certain,
+        near_bijection=near_bijection, panel=panel,
+    )
 
 
 # ── Render states ─────────────────────────────────────────────────────────────
 
-def _html_trusted(annotations=None, near_certain=None, panel=None) -> str:
+def _html_trusted(annotations=None, near_certain=None, near_bijection=None, panel=None) -> str:
     banner = _banner(_GREEN, "✓", "TRUSTED")
     parts: list[str] = [_p(_MSG.TRANSLATION_TRUSTED, _S_LEAD)]
-    parts.append(_near_certain_block(near_certain))
+    parts.append(_prominent_block(near_certain, near_bijection))
     if annotations:
         parts.append(_p(_MSG.STRUCTURAL_FINDING_HEADING, _S_SECTION))
         parts.append(_p(_MSG.STRUCTURAL_FINDING_TRUSTED_LEAD, _S_MUTED))
         for ann in annotations:
             parts.append(_p(html.escape(ann.what), _S_LEAD))
     parts.append(_panel_block(panel))
-    parts.append(_footer_block(_footer_for(_MSG.FOOTER_TRUSTED, _MSG.FOOTER_TRUSTED_WITH_SCREEN, near_certain, panel)))
+    parts.append(_footer_block(_footer_for(
+        _MSG.FOOTER_TRUSTED, _MSG.FOOTER_TRUSTED_WITH_SCREEN, near_certain, near_bijection, panel
+    )))
     body = _wrap_body("".join(parts))
     return _wrap_outer(banner + body)
 
@@ -161,13 +184,14 @@ def _html_actionable(
     attribution: Optional[AblationSummary],
     annotations=None,
     near_certain=None,
+    near_bijection=None,
     panel=None,
 ) -> str:
     banner = _banner(banner_style, icon, word)
 
     parts: list[str] = []
     parts.append(_p(translation, _S_TRANSLATION))
-    parts.append(_near_certain_block(near_certain))
+    parts.append(_prominent_block(near_certain, near_bijection))
     parts.append(_p("THE DAMAGE", _S_SECTION))
     parts.append(_p(
         "Your reported accuracy is inflated — real performance will be lower.",
@@ -198,7 +222,10 @@ def _html_actionable(
             parts.append(_p(html.escape(ann.what), _S_LEAD))
 
     parts.append(_panel_block(panel))
-    parts.append(_footer_block(_footer_for(_MSG.FOOTER_RISKY_FAILED, _MSG.FOOTER_RISKY_FAILED_WITH_SCREEN, near_certain, panel)))
+    parts.append(_footer_block(_footer_for(
+        _MSG.FOOTER_RISKY_FAILED, _MSG.FOOTER_RISKY_FAILED_WITH_SCREEN,
+        near_certain, near_bijection, panel,
+    )))
 
     return _wrap_outer(banner + _wrap_body("".join(parts)))
 
@@ -208,13 +235,14 @@ def _html_inconclusive(
     attribution: Optional[AblationSummary],
     annotations: list | None = None,
     near_certain=None,
+    near_bijection=None,
     panel=None,
 ) -> str:
     banner = _banner(_GREY, "⚠", "INCONCLUSIVE")
 
     parts: list[str] = []
     parts.append(_p(_MSG.TRANSLATION_INCONCLUSIVE, _S_TRANSLATION))
-    parts.append(_near_certain_block(near_certain))
+    parts.append(_prominent_block(near_certain, near_bijection))
     parts.append(_p("THE DAMAGE", _S_SECTION))
     parts.append(_p(
         f"Possible inflation: {fl:+.4f} AUC "
@@ -248,7 +276,10 @@ def _html_inconclusive(
         parts.append(_p(_MSG.ACTION_INCONCLUSIVE_STRUCTURAL, _S_ACTION))
     else:
         parts.append(_p(_MSG.ACTION_INCONCLUSIVE_STATISTICAL, _S_ACTION))
-    parts.append(_footer_block(_footer_for(_MSG.FOOTER_INCONCLUSIVE, _MSG.FOOTER_INCONCLUSIVE_WITH_SCREEN, near_certain, panel)))
+    parts.append(_footer_block(_footer_for(
+        _MSG.FOOTER_INCONCLUSIVE, _MSG.FOOTER_INCONCLUSIVE_WITH_SCREEN,
+        near_certain, near_bijection, panel,
+    )))
 
     return _wrap_outer(banner + _wrap_body("".join(parts)))
 
@@ -313,18 +344,23 @@ def _footer_block(text: str) -> str:
 
 # ── Internal helpers ──────────────────────────────────────────────────────────
 
-def _split_near_certain(annotations: list) -> tuple[list, list]:
-    """Pull NEAR_CERTAIN_UNDECLARED_LEAK findings out of the generic
-    structural_annotations list for prominent rendering (Upgrade 1 step 1f) --
-    mirrors text_view.py's own _split_near_certain exactly (drift-lock is by
+def _split_structural_prominent(annotations: list) -> tuple[list, list, list]:
+    """Pull NEAR_CERTAIN_UNDECLARED_LEAK (Upgrade 1) and
+    NEAR_BIJECTION_UNDECLARED_LEAK (Upgrade H) findings out of the generic
+    structural_annotations list for prominent rendering -- mirrors
+    text_view.py's own _split_structural_prominent exactly (drift-lock is by
     parity test, not shared code -- see this module's docstring)."""
     if not annotations:
-        return [], annotations
+        return [], [], annotations
     near_certain = [a for a in annotations if _is_near_certain(a)]
-    if not near_certain:
-        return [], annotations
-    rest = [a for a in annotations if not _is_near_certain(a)]
-    return near_certain, rest
+    near_bijection = [a for a in annotations if _is_near_bijection(a)]
+    if not near_certain and not near_bijection:
+        return [], [], annotations
+    rest = [
+        a for a in annotations
+        if not _is_near_certain(a) and not _is_near_bijection(a)
+    ]
+    return near_certain, near_bijection, rest
 
 
 def _is_near_certain(ann) -> bool:
@@ -333,15 +369,63 @@ def _is_near_certain(ann) -> bool:
     return value == "near_certain_undeclared_leak"
 
 
-def _near_certain_block(near_certain: list | None) -> str:
-    """PROMINENT box -- the earned hard signal, styled distinctly (red-left-
-    border box) so it cannot be missed, including in the TRUSTED (green)
-    state -- B-3's own motivating case."""
-    if not near_certain:
-        return ""
+def _is_near_bijection(ann) -> bool:
+    issue_type = getattr(ann, "issue_type", None)
+    value = getattr(issue_type, "value", issue_type)
+    return value == "near_bijection_undeclared_leak"
+
+
+def _prominent_block(near_certain: list | None, near_bijection: list | None) -> str:
+    """PROMINENT boxes for NEAR_CERTAIN (Upgrade 1) and NEAR_BIJECTION
+    (Upgrade H), styled distinctly (red-left-border box) so neither can be
+    missed, including in the TRUSTED (green) state -- B-3's own motivating
+    case.
+
+    NEAR_BIJECTION is confirmed=True -- the STRONGER claim -- so whenever it
+    and NEAR_CERTAIN name the SAME feature, NEAR_BIJECTION renders first as
+    the primary box with a short italicized corroboration line, and
+    NEAR_CERTAIN does NOT also render its own separate box for that feature
+    (no duplicated claim). NEAR_CERTAIN findings on a different feature still
+    render their own standalone box, unchanged."""
+    near_bijection = near_bijection or []
+    near_certain = near_certain or []
+    consumed_features = set()
     items: list[str] = []
+
+    for ann in near_bijection:
+        detail = ann.evidence.structural_detail
+        feat = html.escape(detail.feature)
+        match = next(
+            (c for c in near_certain
+             if c.evidence.structural_detail.feature == detail.feature),
+            None,
+        )
+        corroboration = ""
+        if match is not None:
+            consumed_features.add(detail.feature)
+            match_detail = match.evidence.structural_detail
+            corroboration = (
+                f'<p style="{_S_NEAR_BIJECTION_CORROBORATION}">'
+                f'{_MSG.NEAR_BIJECTION_CORROBORATED_BY_NEAR_CERTAIN.format(feature=feat, auc=match_detail.univariate_auc)}'
+                f'</p>'
+            )
+        items.append(
+            f'<div style="{_S_NEAR_BIJECTION_BOX}">'
+            f'<p style="{_S_NEAR_BIJECTION_HEADING}">{_MSG.NEAR_BIJECTION_HEADING}</p>'
+            f'<p style="{_S_NEAR_BIJECTION_LEAD}">'
+            f'{_MSG.NEAR_BIJECTION_LEAD.format(feature=feat, theil_u=detail.theil_u, threshold_compared_against=detail.threshold_compared_against)}'
+            f'</p>'
+            f'{corroboration}'
+            f'<p style="{_S_NEAR_BIJECTION_ACTION}">'
+            f'{_MSG.NEAR_BIJECTION_ACTION.format(feature=feat)}'
+            f'</p>'
+            f'</div>'
+        )
+
     for ann in near_certain:
         detail = ann.evidence.structural_detail
+        if detail.feature in consumed_features:
+            continue
         feat = html.escape(detail.feature)
         items.append(
             f'<div style="{_S_NEAR_CERTAIN_BOX}">'
@@ -387,11 +471,11 @@ def _panel_block(panel) -> str:
     return "".join(parts)
 
 
-def _footer_for(base: str, with_screen: str, near_certain, panel) -> str:
-    """Select the screen-honest footer variant whenever a NEAR_CERTAIN
-    finding or the ranked panel is present -- mirrors text_view.py's own
-    _footer_for exactly."""
-    if near_certain or panel is not None:
+def _footer_for(base: str, with_screen: str, near_certain, near_bijection, panel) -> str:
+    """Select the screen-honest footer variant whenever a NEAR_CERTAIN or
+    NEAR_BIJECTION finding, or the ranked panel, is present -- mirrors
+    text_view.py's own _footer_for exactly."""
+    if near_certain or near_bijection or panel is not None:
         return with_screen
     return base
 

@@ -129,6 +129,36 @@ NEAR_CERTAIN_ACTION = (
     "Add '{feature}' to forbidden_after_prediction and re-run to measure its true impact."
 )
 
+# ── Structural check: NEAR_BIJECTION (Upgrade H) ─────────────────────────────
+# Rendered in the SAME prominent slot as NEAR_CERTAIN above, at least equal
+# prominence -- confirmed=True (a deterministic counting fact) is the
+# STRONGER claim than NEAR_CERTAIN's confirmed=False model inference. When
+# both fire on the same feature, NEAR_BIJECTION renders as the primary
+# statement and NEAR_BIJECTION_CORROBORATED_BY_NEAR_CERTAIN below adds a
+# short corroboration line instead of a second full restatement (no
+# duplicated claim -- see text_view.py/html_view.py's merge logic).
+# Call .format(feature=..., theil_u=..., threshold_compared_against=...) on
+# NEAR_BIJECTION_LEAD, .format(feature=...) on NEAR_BIJECTION_ACTION, and
+# .format(feature=..., auc=...) on NEAR_BIJECTION_CORROBORATED_BY_NEAR_CERTAIN.
+
+NEAR_BIJECTION_HEADING = "NEAR-BIJECTION UNDECLARED LEAK"
+
+NEAR_BIJECTION_LEAD = (
+    "The values of '{feature}' determine the target almost exactly (Theil's U "
+    "{theil_u:.4f}, flagged at >= {threshold_compared_against:.2f}, after "
+    "pooling rare values) and it was NOT declared forbidden. The verdict "
+    "above does not account for it."
+)
+
+NEAR_BIJECTION_CORROBORATED_BY_NEAR_CERTAIN = (
+    "Zekan's separate model-based screen flagged '{feature}' too (univariate "
+    "AUC {auc:.4f}) -- two independent checks agree."
+)
+
+NEAR_BIJECTION_ACTION = (
+    "Add '{feature}' to forbidden_after_prediction and re-run to measure its true impact."
+)
+
 # ── Undeclared-feature screen: ranked informational panel ────────────────────
 # Rendered in the same trailing position as STRUCTURAL FINDING. No threshold,
 # no suspicion claim -- this is a candidate list, never a flag. Wording here

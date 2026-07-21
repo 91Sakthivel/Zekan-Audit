@@ -26,14 +26,17 @@ def render_verdict(report: VerdictReport, stream=None) -> str:
     attribution = report.measured_damage.feature_attribution
     detection_channel = report.engine_detection.detection_channel
     panel = report.undeclared_feature_panel
-    near_certain, annotations = _split_near_certain(report.structural_annotations)
+    near_certain, near_bijection, annotations = _split_structural_prominent(
+        report.structural_annotations
+    )
 
     fold_ci = report.fold_ci
 
     if verdict in ("PASS", "NOTE"):
         text = _render_trusted(
             _marker("trusted", stream), annotations=annotations, fold_ci=fold_ci,
-            detection_channel=detection_channel, near_certain=near_certain, panel=panel,
+            detection_channel=detection_channel, near_certain=near_certain,
+            near_bijection=near_bijection, panel=panel,
         )
     elif verdict == "WARN":
         text = _render_actionable(
@@ -45,6 +48,7 @@ def render_verdict(report: VerdictReport, stream=None) -> str:
             fold_ci=fold_ci,
             detection_channel=detection_channel,
             near_certain=near_certain,
+            near_bijection=near_bijection,
             panel=panel,
         )
     elif verdict == "FAIL":
@@ -57,6 +61,7 @@ def render_verdict(report: VerdictReport, stream=None) -> str:
             fold_ci=fold_ci,
             detection_channel=detection_channel,
             near_certain=near_certain,
+            near_bijection=near_bijection,
             panel=panel,
         )
     elif verdict == "UNCONFIRMED_HIGH_DAMAGE":
@@ -67,12 +72,13 @@ def render_verdict(report: VerdictReport, stream=None) -> str:
             annotations=annotations,
             fold_ci=fold_ci,
             near_certain=near_certain,
+            near_bijection=near_bijection,
             panel=panel,
         )
     else:
         text = _render_trusted(
             _marker("trusted", stream), annotations=annotations,
-            near_certain=near_certain, panel=panel,
+            near_certain=near_certain, near_bijection=near_bijection, panel=panel,
         )
     return _sanitize(text, stream)
 
@@ -84,13 +90,13 @@ _DIVIDER = "─" * 60
 
 def _render_trusted(
     banner: str, annotations=None, fold_ci: Optional[FoldCI] = None,
-    detection_channel: str = "", near_certain=None, panel=None,
+    detection_channel: str = "", near_certain=None, near_bijection=None, panel=None,
 ) -> str:
     lines = [banner, _MSG.TRANSLATION_TRUSTED, ""]
     if detection_channel in ("across_entity", "both"):
         lines.append(_MSG.ACROSS_ENTITY_DETECTED)
         lines.append("")
-    _append_block(lines, _near_certain_lines(near_certain))
+    _append_block(lines, _prominent_lines(near_certain, near_bijection))
     if fold_ci is not None and fold_ci.stability_seeds_checked > 0 and not fold_ci.seed_instability_note:
         lines.append(
             f"  Stability: verdict consistent across {fold_ci.stability_seeds_checked} null seeds."
@@ -105,7 +111,9 @@ def _render_trusted(
     _append_block(lines, _panel_lines(panel))
     _ensure_blank(lines)
     lines.append(_DIVIDER)
-    lines.append(_footer_for(_MSG.FOOTER_TRUSTED, _MSG.FOOTER_TRUSTED_WITH_SCREEN, near_certain, panel))
+    lines.append(_footer_for(
+        _MSG.FOOTER_TRUSTED, _MSG.FOOTER_TRUSTED_WITH_SCREEN, near_certain, near_bijection, panel
+    ))
     return "\n".join(lines)
 
 
@@ -118,13 +126,14 @@ def _render_actionable(
     fold_ci: Optional[FoldCI] = None,
     detection_channel: str = "",
     near_certain=None,
+    near_bijection=None,
     panel=None,
 ) -> str:
     lines: list[str] = [marker, translation, ""]
     if detection_channel in ("across_entity", "both"):
         lines.append(_MSG.ACROSS_ENTITY_DETECTED)
         lines.append("")
-    _append_block(lines, _near_certain_lines(near_certain))
+    _append_block(lines, _prominent_lines(near_certain, near_bijection))
 
     lines.append("THE DAMAGE")
     lines.append("  Your reported accuracy is inflated — real performance will be lower.")
@@ -183,7 +192,10 @@ def _render_actionable(
 
     _ensure_blank(lines)
     lines.append(_DIVIDER)
-    lines.append(_footer_for(_MSG.FOOTER_RISKY_FAILED, _MSG.FOOTER_RISKY_FAILED_WITH_SCREEN, near_certain, panel))
+    lines.append(_footer_for(
+        _MSG.FOOTER_RISKY_FAILED, _MSG.FOOTER_RISKY_FAILED_WITH_SCREEN,
+        near_certain, near_bijection, panel,
+    ))
 
     return "\n".join(lines)
 
@@ -195,6 +207,7 @@ def _render_inconclusive(
     annotations: list | None = None,
     fold_ci: Optional[FoldCI] = None,
     near_certain=None,
+    near_bijection=None,
     panel=None,
 ) -> str:
     lines: list[str] = [banner, _MSG.TRANSLATION_INCONCLUSIVE, ""]
@@ -215,7 +228,7 @@ def _render_inconclusive(
         )
         lines.append("")
 
-    _append_block(lines, _near_certain_lines(near_certain))
+    _append_block(lines, _prominent_lines(near_certain, near_bijection))
 
     lines.extend([
         "THE DAMAGE",
@@ -266,26 +279,34 @@ def _render_inconclusive(
         lines.append(_MSG.ACTION_INCONCLUSIVE_STATISTICAL)
     _ensure_blank(lines)
     lines.append(_DIVIDER)
-    lines.append(_footer_for(_MSG.FOOTER_INCONCLUSIVE, _MSG.FOOTER_INCONCLUSIVE_WITH_SCREEN, near_certain, panel))
+    lines.append(_footer_for(
+        _MSG.FOOTER_INCONCLUSIVE, _MSG.FOOTER_INCONCLUSIVE_WITH_SCREEN,
+        near_certain, near_bijection, panel,
+    ))
 
     return "\n".join(lines)
 
 
 # ── Internal helpers ──────────────────────────────────────────────────────────
 
-def _split_near_certain(annotations: list) -> tuple[list, list]:
-    """Pull NEAR_CERTAIN_UNDECLARED_LEAK findings out of the generic
-    structural_annotations list for prominent rendering (Upgrade 1 step 1f) --
-    everything else still renders exactly as before, in the trailing
-    STRUCTURAL FINDING position. Returns (near_certain, rest).
+def _split_structural_prominent(annotations: list) -> tuple[list, list, list]:
+    """Pull NEAR_CERTAIN_UNDECLARED_LEAK (Upgrade 1) and
+    NEAR_BIJECTION_UNDECLARED_LEAK (Upgrade H) findings out of the generic
+    structural_annotations list for prominent rendering, beside the verdict
+    -- everything else still renders exactly as before, in the trailing
+    STRUCTURAL FINDING position. Returns (near_certain, near_bijection, rest).
     """
     if not annotations:
-        return [], annotations
+        return [], [], annotations
     near_certain = [a for a in annotations if _is_near_certain(a)]
-    if not near_certain:
-        return [], annotations
-    rest = [a for a in annotations if not _is_near_certain(a)]
-    return near_certain, rest
+    near_bijection = [a for a in annotations if _is_near_bijection(a)]
+    if not near_certain and not near_bijection:
+        return [], [], annotations
+    rest = [
+        a for a in annotations
+        if not _is_near_certain(a) and not _is_near_bijection(a)
+    ]
+    return near_certain, near_bijection, rest
 
 
 def _is_near_certain(ann) -> bool:
@@ -294,23 +315,65 @@ def _is_near_certain(ann) -> bool:
     return value == "near_certain_undeclared_leak"
 
 
-def _near_certain_lines(near_certain: list | None) -> list[str]:
-    """PROMINENT block content -- the earned hard signal. Rendered near the
-    top of every verdict state, including TRUSTED (see this module's
-    render_verdict: inserted before THE DAMAGE/fix sections, right after the
-    headline). No leading/trailing blank padding -- callers use
-    _append_block so exactly one blank line separates this from whatever
-    precedes/follows it, never zero, never doubled (FIX 4 output hygiene,
-    tests/test_cli.py::test_no_consecutive_blank_lines_with_gate)."""
-    if not near_certain:
-        return []
-    lines = [_MSG.NEAR_CERTAIN_HEADING]
+def _is_near_bijection(ann) -> bool:
+    issue_type = getattr(ann, "issue_type", None)
+    value = getattr(issue_type, "value", issue_type)  # duck-typed-fake-friendly
+    return value == "near_bijection_undeclared_leak"
+
+
+def _prominent_lines(near_certain: list | None, near_bijection: list | None) -> list[str]:
+    """PROMINENT block content for NEAR_CERTAIN (Upgrade 1) and NEAR_BIJECTION
+    (Upgrade H) findings, rendered near the top of every verdict state,
+    including TRUSTED (see this module's render_verdict: inserted before THE
+    DAMAGE/fix sections, right after the headline).
+
+    NEAR_BIJECTION is confirmed=True -- a deterministic counting fact -- and
+    is therefore the STRONGER claim whenever it and NEAR_CERTAIN
+    (confirmed=False, a model inference) name the SAME feature: it renders
+    first, as the primary statement, with a short corroboration line naming
+    NEAR_CERTAIN's result instead of NEAR_CERTAIN restating its own block in
+    full (no duplicated claim about one feature). NEAR_CERTAIN findings on a
+    feature NOT also flagged by NEAR_BIJECTION still render standalone,
+    unchanged, exactly as before.
+
+    No leading/trailing blank padding -- callers use _append_block so
+    exactly one blank line separates this from whatever precedes/follows it,
+    never zero, never doubled (FIX 4 output hygiene, tests/test_cli.py::
+    test_no_consecutive_blank_lines_with_gate)."""
+    near_bijection = near_bijection or []
+    near_certain = near_certain or []
+    consumed_features = set()
+    lines: list[str] = []
+
+    for ann in near_bijection:
+        detail = ann.evidence.structural_detail
+        match = next(
+            (c for c in near_certain
+             if c.evidence.structural_detail.feature == detail.feature),
+            None,
+        )
+        lines.append(_MSG.NEAR_BIJECTION_HEADING)
+        lines.append(
+            f"  {_MSG.NEAR_BIJECTION_LEAD.format(feature=detail.feature, theil_u=detail.theil_u, threshold_compared_against=detail.threshold_compared_against)}"
+        )
+        if match is not None:
+            consumed_features.add(detail.feature)
+            match_detail = match.evidence.structural_detail
+            lines.append(
+                f"  {_MSG.NEAR_BIJECTION_CORROBORATED_BY_NEAR_CERTAIN.format(feature=detail.feature, auc=match_detail.univariate_auc)}"
+            )
+        lines.append(f"  {_MSG.NEAR_BIJECTION_ACTION.format(feature=detail.feature)}")
+
     for ann in near_certain:
         detail = ann.evidence.structural_detail
+        if detail.feature in consumed_features:
+            continue
+        lines.append(_MSG.NEAR_CERTAIN_HEADING)
         lines.append(
             f"  {_MSG.NEAR_CERTAIN_LEAD.format(feature=detail.feature, auc=detail.univariate_auc)}"
         )
         lines.append(f"  {_MSG.NEAR_CERTAIN_ACTION.format(feature=detail.feature)}")
+
     return lines
 
 
@@ -319,7 +382,7 @@ def _panel_lines(panel) -> list[str]:
     Renders whenever the screen ran (panel is not None), independent of
     whether structural_annotations/near_certain are present, so "screened X
     of Y" is never silently absent. No leading/trailing blank padding -- see
-    _near_certain_lines' docstring; same _append_block convention."""
+    _prominent_lines' docstring; same _append_block convention."""
     if panel is None:
         return []
     lines = [_MSG.RANKED_PANEL_HEADING, f"  {_MSG.RANKED_PANEL_LEAD}"]
@@ -344,7 +407,7 @@ def _ensure_blank(lines: list[str]) -> None:
 
 
 def _append_block(lines: list[str], block: list[str]) -> None:
-    """Append `block` (from _near_certain_lines/_panel_lines) with exactly
+    """Append `block` (from _prominent_lines/_panel_lines) with exactly
     one blank line of separation before it and one trailing blank after --
     regardless of what already precedes it. No-op when `block` is empty (no
     padding introduced for a block with nothing to say)."""
@@ -355,11 +418,12 @@ def _append_block(lines: list[str], block: list[str]) -> None:
     lines.append("")
 
 
-def _footer_for(base: str, with_screen: str, near_certain, panel) -> str:
-    """Select the screen-honest footer variant whenever a NEAR_CERTAIN
-    finding or the ranked panel is present -- the base footer's unqualified
-    "does not inspect undeclared features" claim would otherwise be false."""
-    if near_certain or panel is not None:
+def _footer_for(base: str, with_screen: str, near_certain, near_bijection, panel) -> str:
+    """Select the screen-honest footer variant whenever a NEAR_CERTAIN or
+    NEAR_BIJECTION finding, or the ranked panel, is present -- the base
+    footer's unqualified "does not inspect undeclared features" claim would
+    otherwise be false."""
+    if near_certain or near_bijection or panel is not None:
         return with_screen
     return base
 
