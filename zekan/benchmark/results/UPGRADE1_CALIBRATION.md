@@ -449,3 +449,102 @@ committed there). `scratch/testB2_strat.csv`'s own generation method (beyond
 "417 rows per period_ordinal bucket, preserving temporal structure") was not
 re-derived here — it was reused as-is, and the B-3 10k frame was built by
 matching its exact `encounter_id` set for a directly comparable pair.
+
+## Upgrade 1 step 1g — post-implementation validation
+
+Step 1e implemented the probe (`zekan/detectors/undeclared_feature_probe.py`)
+against this document's own findings: `NEAR_CERTAIN_UNDECLARED_LEAK` as
+pre-registered (absolute, `AUC >= 0.99` every fold), and the SUSPECTED tier
+replaced by an annotate-nothing ranked panel, per the FDR design failure
+recorded above. Step 1f surfaced both in `text_view.py`/`html_view.py`. This
+section closes the loop: does the shipped behavior match what the
+pre-registration and this calibration predicted, run end-to-end on the real
+101,766-row Test B frames, on the default path (no `--stability`, default
+`n_jobs`)? Logs: `scratch/1g_B1.log`, `1g_B2.log`, `1g_B3.log`.
+
+### Pre-registered validation conditions vs. what ran
+
+| condition (`UPGRADE1_PREREGISTRATION.md`, "Validation conditions") | met? |
+|---|---|
+| B-1: verdict unchanged (TRUSTED); `number_inpatient` not annotated at either tier | **Yes.** TRUSTED, unchanged. No `NEAR_CERTAIN`. `number_inpatient` appears only in the panel (rank 1, AUC 0.6079), which carries no threshold and asserts no issue — not an annotation. |
+| B-3: verdict unchanged (PASS); `NEAR_CERTAIN_UNDECLARED_LEAK` present, naming `readmitted`, rendered prominently, AUC shown in text | **Yes.** PASS, unchanged. `NEAR_CERTAIN` block renders immediately after the verdict headline, names `readmitted`, shows `AUC 1.0000` in the rendered text (not JSON-only). |
+| B-2: `planted_leak` outside screen scope (declared forbidden), not duplicate-flagged; no honest feature newly flagged | **Yes.** `planted_leak` absent from the panel (it's excluded from candidates as declared-forbidden, per `probe_undeclared_feature_screen`'s `forbidden` set) and from `NEAR_CERTAIN` — its leakage is still caught, correctly, by the existing B/C attribution path (`+0.3089` AUC), which is a separate mechanism from this screen. No panel entry crossed the `NEAR_CERTAIN` floor. |
+| Temporal-vs-random wiring test passes | **Yes**, but not exercised by these three runs — covered separately by `tests/test_undeclared_feature_probe.py::test_temporal_vs_random_invariant_screen_reports_temporal_score`, part of the "Full suite" pass below. |
+| Resilience: a probe exception surfaces as a registered `PROBE_FAILED` record, not a crash; soft time budget respected | **Partially verified.** `PROBE_FAILED` isolation is generic infrastructure in `audit._run_structural_probes` (`tests/test_structural_probe_wiring.py`), and the undeclared-feature probe is registered through the same `_ProbeSpec` mechanism (`test_registered_in_probe_registry_with_correct_capability_flags`) — so an exception in this probe specifically is caught by construction, not by a probe-specific test. No failure was injected into this probe directly. The soft time budget (`deadline`) is accepted for calling-convention compatibility but not consulted by the probe (documented in its own docstring) — not a violation of the pre-registration's letter (which called it a "soft, cooperative" budget), but not actively enforced either. |
+
+### Run summaries (full 101,766 rows, default path)
+
+- **B-1** (`scratch/1g_B1.log`): verdict **TRUSTED**, unchanged. No `NEAR_CERTAIN`. `number_inpatient` ranked #1 in the panel, AUC 0.6079, reported as a candidate with no claim attached. Screened 48 of 48 non-forbidden features, 0 not screenable.
+- **B-2** (`scratch/1g_B2.log`): verdict **FAILED**, unchanged. B−C fixable-leakage inflation +0.3095 AUC; `planted_leak` #1 in attribution at +0.3089 AUC. `planted_leak` correctly **absent** from the screen (declared forbidden, out of scope by construction). Screened 48 of 48. No honest feature newly flagged.
+- **B-3** (`scratch/1g_B3.log`): verdict **PASS**, unchanged. `NEAR_CERTAIN` block names `readmitted`, AUC 1.0000, rendered immediately after the verdict. Panel shows `readmitted` at 1.0000 then a cliff to `number_inpatient` at 0.6079 — the same ~0.39 gap this document's own margin measurement (item 5, above) predicted. Screened 49 of 49 (49, not 48, because raw `readmitted` is itself an undeclared, unscreened-out candidate in this frame).
+- **Full suite**: 837 passed.
+
+### Measured cost correction
+
+The pre-registration's own calibration plan did not fix a cost estimate; a
+separate, earlier estimate (~5–15s per audit for the screen) was derived
+from the 10k-row case and never re-measured at the full 101,766-row scale
+before this task. That estimate was **low, and scoped to 10k** — the real
+cost at full scale is materially higher.
+
+Measured wall-clock (log file mtimes, start-to-finish):
+
+| run | wall-clock | vs. pre-screen baseline |
+|---|---|---|
+| B-1 (TRUSTED) | ~54s | — |
+| B-2 (FAILED) | **~1458s (24m18s)** | baseline (`TEST_B_RESULTS.md`) was 557s pre-screen — **~2.6x** |
+| B-3 (PASS) | ~55s | — |
+
+B-2 is the only one of the three that pays **both** the full null/ablation
+attribution path (needed to measure and rank `planted_leak`'s damage) **and**
+the undeclared-feature screen — B-1 and B-3 are fast because a TRUSTED/PASS
+verdict does comparatively little attribution work. B-2's true screen-only
+marginal cost (1458s − 557s ≈ 900s, roughly 15 minutes) is the honest number
+for a full-attribution audit at this row count, not the pre-registration's
+~5–15s estimate.
+
+**Contributing factor**: 48 non-forbidden features sits just under
+`WIDE_DATA_CAP = 50` (`undeclared_feature_probe.py:104`), so every feature on
+this frame received a full temporal-fold model fit rather than the cheap
+`_pre_rank` correlation pass — the wide-data cap path never triggered on
+this data (also noted separately below, under "what remains unvalidated").
+This is recorded as a finding, not a fix: the cap value itself is not
+changed by this task.
+
+**Follow-up flagged, not actioned here**: revisit `WIDE_DATA_CAP` (currently
+50) — whether the pre-rank threshold should be materially lower than
+"barely above Diabetes-130's own feature count" now that full scoring at
+48 features has been measured to cost ~15 minutes of marginal wall-clock on
+a 100k-row frame.
+
+### What remains unvalidated (post-1g, in addition to step 1d's own list above)
+
+- **The screen was not exercised under `--stability`.** All three runs used
+  the default path. Whether the panel/`NEAR_CERTAIN` data survives
+  `_apply_seed_stability`'s re-verdicting unchanged (or interacts with it at
+  all) was not checked here.
+- **The wide-data cap path never triggered on this data.** Both B-1/B-2 (48
+  candidates) and B-3 (49) sit under `WIDE_DATA_CAP = 50`, so `_pre_rank`
+  never ran in any of these three validation runs — only the
+  step-1d calibration's own reasoning (not a real end-to-end run) speaks to
+  its behavior.
+- **Name-similarity corroboration contributes nothing here.** As documented
+  in `undeclared_feature_probe.py`'s own module docstring, `_name_score`
+  matches a fixed set of temporal-keyword shapes (`final_*`, `days_to_*`,
+  `_after_`, etc.), not feature-vs-target name similarity — confirmed again
+  in this run: `readmitted` (target `readmitted_lt30`) scores
+  `name_pattern_score=0.0` despite being an almost-literal name match to the
+  target. The corroboration field is present in every panel/`NEAR_CERTAIN`
+  record but added no signal in the one case where a human would most
+  expect it to.
+- **`known_strong_features` remains unimplemented.** No `PredictionContract`
+  field exists yet (only the unused `suppressed_by_known_strong_features`
+  bool on the dormant `SuspectedUndeclaredLeakDetail` struct) — there is
+  nothing for it to suppress while the SUSPECTED tier itself stays deferred,
+  so this was correctly out of scope for 1g, not a gap introduced by it.
+- **Resilience was verified generically, not with a failure injected into
+  this specific probe** (see validation-conditions table above) — the
+  isolation mechanism is shared infrastructure already tested elsewhere, but
+  no test drives an exception through
+  `probe_undeclared_feature_screen` itself to confirm it degrades the same
+  way.
