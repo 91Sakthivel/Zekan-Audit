@@ -24,15 +24,16 @@ def render_verdict(report: VerdictReport, stream=None) -> str:
     verdict = report.policy_decision.verdict
     fl = report.measured_damage.fixable_leakage
     attribution = report.measured_damage.feature_attribution
-    annotations = report.structural_annotations
     detection_channel = report.engine_detection.detection_channel
+    panel = report.undeclared_feature_panel
+    near_certain, annotations = _split_near_certain(report.structural_annotations)
 
     fold_ci = report.fold_ci
 
     if verdict in ("PASS", "NOTE"):
         text = _render_trusted(
             _marker("trusted", stream), annotations=annotations, fold_ci=fold_ci,
-            detection_channel=detection_channel,
+            detection_channel=detection_channel, near_certain=near_certain, panel=panel,
         )
     elif verdict == "WARN":
         text = _render_actionable(
@@ -43,6 +44,8 @@ def render_verdict(report: VerdictReport, stream=None) -> str:
             annotations=annotations,
             fold_ci=fold_ci,
             detection_channel=detection_channel,
+            near_certain=near_certain,
+            panel=panel,
         )
     elif verdict == "FAIL":
         text = _render_actionable(
@@ -53,6 +56,8 @@ def render_verdict(report: VerdictReport, stream=None) -> str:
             annotations=annotations,
             fold_ci=fold_ci,
             detection_channel=detection_channel,
+            near_certain=near_certain,
+            panel=panel,
         )
     elif verdict == "UNCONFIRMED_HIGH_DAMAGE":
         text = _render_inconclusive(
@@ -61,9 +66,14 @@ def render_verdict(report: VerdictReport, stream=None) -> str:
             attribution=attribution,
             annotations=annotations,
             fold_ci=fold_ci,
+            near_certain=near_certain,
+            panel=panel,
         )
     else:
-        text = _render_trusted(_marker("trusted", stream), annotations=annotations)
+        text = _render_trusted(
+            _marker("trusted", stream), annotations=annotations,
+            near_certain=near_certain, panel=panel,
+        )
     return _sanitize(text, stream)
 
 
@@ -74,12 +84,13 @@ _DIVIDER = "─" * 60
 
 def _render_trusted(
     banner: str, annotations=None, fold_ci: Optional[FoldCI] = None,
-    detection_channel: str = "",
+    detection_channel: str = "", near_certain=None, panel=None,
 ) -> str:
     lines = [banner, _MSG.TRANSLATION_TRUSTED, ""]
     if detection_channel in ("across_entity", "both"):
         lines.append(_MSG.ACROSS_ENTITY_DETECTED)
         lines.append("")
+    _append_block(lines, _near_certain_lines(near_certain))
     if fold_ci is not None and fold_ci.stability_seeds_checked > 0 and not fold_ci.seed_instability_note:
         lines.append(
             f"  Stability: verdict consistent across {fold_ci.stability_seeds_checked} null seeds."
@@ -91,7 +102,10 @@ def _render_trusted(
         for ann in annotations:
             lines.append(f"  {ann.what}")
         lines.append("")
-    lines.extend([_DIVIDER, _MSG.FOOTER_TRUSTED])
+    _append_block(lines, _panel_lines(panel))
+    _ensure_blank(lines)
+    lines.append(_DIVIDER)
+    lines.append(_footer_for(_MSG.FOOTER_TRUSTED, _MSG.FOOTER_TRUSTED_WITH_SCREEN, near_certain, panel))
     return "\n".join(lines)
 
 
@@ -103,11 +117,14 @@ def _render_actionable(
     annotations=None,
     fold_ci: Optional[FoldCI] = None,
     detection_channel: str = "",
+    near_certain=None,
+    panel=None,
 ) -> str:
     lines: list[str] = [marker, translation, ""]
     if detection_channel in ("across_entity", "both"):
         lines.append(_MSG.ACROSS_ENTITY_DETECTED)
         lines.append("")
+    _append_block(lines, _near_certain_lines(near_certain))
 
     lines.append("THE DAMAGE")
     lines.append("  Your reported accuracy is inflated — real performance will be lower.")
@@ -162,9 +179,11 @@ def _render_actionable(
         for ann in annotations:
             lines.append(f"  {ann.what}")
 
-    lines.append("")
+    _append_block(lines, _panel_lines(panel))
+
+    _ensure_blank(lines)
     lines.append(_DIVIDER)
-    lines.append(_MSG.FOOTER_RISKY_FAILED)
+    lines.append(_footer_for(_MSG.FOOTER_RISKY_FAILED, _MSG.FOOTER_RISKY_FAILED_WITH_SCREEN, near_certain, panel))
 
     return "\n".join(lines)
 
@@ -175,6 +194,8 @@ def _render_inconclusive(
     attribution: Optional[AblationSummary],
     annotations: list | None = None,
     fold_ci: Optional[FoldCI] = None,
+    near_certain=None,
+    panel=None,
 ) -> str:
     lines: list[str] = [banner, _MSG.TRANSLATION_INCONCLUSIVE, ""]
 
@@ -193,6 +214,8 @@ def _render_inconclusive(
             + "."
         )
         lines.append("")
+
+    _append_block(lines, _near_certain_lines(near_certain))
 
     lines.extend([
         "THE DAMAGE",
@@ -233,20 +256,113 @@ def _render_inconclusive(
         for ann in annotations:
             lines.append(f"  {ann.what}")
 
-    lines.append("")
+    _append_block(lines, _panel_lines(panel))
+
+    _ensure_blank(lines)
     lines.append(_MSG.ACTION_INCONCLUSIVE_OPENER)
     if annotations:
         lines.append(_MSG.ACTION_INCONCLUSIVE_STRUCTURAL)
     else:
         lines.append(_MSG.ACTION_INCONCLUSIVE_STATISTICAL)
-    lines.append("")
+    _ensure_blank(lines)
     lines.append(_DIVIDER)
-    lines.append(_MSG.FOOTER_INCONCLUSIVE)
+    lines.append(_footer_for(_MSG.FOOTER_INCONCLUSIVE, _MSG.FOOTER_INCONCLUSIVE_WITH_SCREEN, near_certain, panel))
 
     return "\n".join(lines)
 
 
 # ── Internal helpers ──────────────────────────────────────────────────────────
+
+def _split_near_certain(annotations: list) -> tuple[list, list]:
+    """Pull NEAR_CERTAIN_UNDECLARED_LEAK findings out of the generic
+    structural_annotations list for prominent rendering (Upgrade 1 step 1f) --
+    everything else still renders exactly as before, in the trailing
+    STRUCTURAL FINDING position. Returns (near_certain, rest).
+    """
+    if not annotations:
+        return [], annotations
+    near_certain = [a for a in annotations if _is_near_certain(a)]
+    if not near_certain:
+        return [], annotations
+    rest = [a for a in annotations if not _is_near_certain(a)]
+    return near_certain, rest
+
+
+def _is_near_certain(ann) -> bool:
+    issue_type = getattr(ann, "issue_type", None)
+    value = getattr(issue_type, "value", issue_type)  # duck-typed-fake-friendly
+    return value == "near_certain_undeclared_leak"
+
+
+def _near_certain_lines(near_certain: list | None) -> list[str]:
+    """PROMINENT block content -- the earned hard signal. Rendered near the
+    top of every verdict state, including TRUSTED (see this module's
+    render_verdict: inserted before THE DAMAGE/fix sections, right after the
+    headline). No leading/trailing blank padding -- callers use
+    _append_block so exactly one blank line separates this from whatever
+    precedes/follows it, never zero, never doubled (FIX 4 output hygiene,
+    tests/test_cli.py::test_no_consecutive_blank_lines_with_gate)."""
+    if not near_certain:
+        return []
+    lines = [_MSG.NEAR_CERTAIN_HEADING]
+    for ann in near_certain:
+        detail = ann.evidence.structural_detail
+        lines.append(
+            f"  {_MSG.NEAR_CERTAIN_LEAD.format(feature=detail.feature, auc=detail.univariate_auc)}"
+        )
+        lines.append(f"  {_MSG.NEAR_CERTAIN_ACTION.format(feature=detail.feature)}")
+    return lines
+
+
+def _panel_lines(panel) -> list[str]:
+    """Ranked informational panel content -- in the annotation position.
+    Renders whenever the screen ran (panel is not None), independent of
+    whether structural_annotations/near_certain are present, so "screened X
+    of Y" is never silently absent. No leading/trailing blank padding -- see
+    _near_certain_lines' docstring; same _append_block convention."""
+    if panel is None:
+        return []
+    lines = [_MSG.RANKED_PANEL_HEADING, f"  {_MSG.RANKED_PANEL_LEAD}"]
+    for i, entry in enumerate(panel.entries, 1):
+        lines.append(f"  {i}. {entry.feature} — univariate AUC {entry.univariate_auc:.4f}")
+    lines.append(
+        f"  {_MSG.RANKED_PANEL_SCREENED.format(screened=panel.screened_count, total=panel.total_features)}"
+    )
+    if panel.not_screenable:
+        lines.append(
+            f"  {_MSG.RANKED_PANEL_NOT_SCREENABLE.format(count=len(panel.not_screenable))}"
+        )
+    lines.append(f"  {_MSG.RANKED_PANEL_ACTION}")
+    return lines
+
+
+def _ensure_blank(lines: list[str]) -> None:
+    """Append a single blank line, unless `lines` is empty or already ends
+    with one. Idempotent separator -- never produces a double blank."""
+    if lines and lines[-1] != "":
+        lines.append("")
+
+
+def _append_block(lines: list[str], block: list[str]) -> None:
+    """Append `block` (from _near_certain_lines/_panel_lines) with exactly
+    one blank line of separation before it and one trailing blank after --
+    regardless of what already precedes it. No-op when `block` is empty (no
+    padding introduced for a block with nothing to say)."""
+    if not block:
+        return
+    _ensure_blank(lines)
+    lines.extend(block)
+    lines.append("")
+
+
+def _footer_for(base: str, with_screen: str, near_certain, panel) -> str:
+    """Select the screen-honest footer variant whenever a NEAR_CERTAIN
+    finding or the ranked panel is present -- the base footer's unqualified
+    "does not inspect undeclared features" claim would otherwise be false."""
+    if near_certain or panel is not None:
+        return with_screen
+    return base
+
 
 def _sorted_ablated(attribution: Optional[AblationSummary]) -> list[AblationEntry]:
     """Ablated entries sorted by leakage_estimate descending; NaN entries excluded."""
