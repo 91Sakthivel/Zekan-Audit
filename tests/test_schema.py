@@ -24,6 +24,7 @@ from zekan.detectors.schema import (
     IssueRecord,
     IssueSeverity,
     IssueType,
+    NearBijectionUndeclaredLeakDetail,
     NearCertainUndeclaredLeakDetail,
     ProbeDetail,
     ProbeFailedDetail,
@@ -149,6 +150,69 @@ def test_near_certain_undeclared_leak_round_trips_through_json():
     assert restored.evidence.structural_detail.univariate_auc == pytest.approx(1.0)
 
 
+# ── NEAR_BIJECTION_UNDECLARED_LEAK (Upgrade H) ─────────────────────────────────
+
+def _near_bijection_record(**detail_overrides) -> IssueRecord:
+    detail_kwargs = dict(
+        feature="readmitted", theil_u=1.0, support_floor=2,
+        threshold_compared_against=0.99, n_distinct_raw=3,
+        n_distinct_after_pooling=3, n_rows_pooled=0,
+        screened_count=49, total_features=49,
+    )
+    detail_kwargs.update(detail_overrides)
+    return IssueRecord(
+        issue_type=IssueType.NEAR_BIJECTION_UNDECLARED_LEAK,
+        status="fail",
+        what="w", why="w", how_much="w", next_fix="w",
+        evidence=Evidence(structural_detail=NearBijectionUndeclaredLeakDetail(**detail_kwargs)),
+    )
+
+
+def test_near_bijection_undeclared_leak_computed_fields():
+    """Mirrors FORBIDDEN_ENTITY_LEVEL_AGGREGATE, NOT the FLAGGED_SUSPICIOUS/
+    confirmed=False pair above: a deterministic value-to-label partition
+    (Theil's U, post-pooling) is a counting fact, not a model score."""
+    rec = _near_bijection_record()
+    assert rec.source_layer == SourceLayer.DETECTED_STRUCTURAL
+    assert rec.severity == IssueSeverity.HIGH
+    assert rec.evidence_scope == EvidenceScope.DATA_ONLY
+    assert rec.impact_type == ImpactType.STRUCTURAL_RISK
+    assert rec.confirmed is True
+
+
+def test_near_bijection_undeclared_leak_never_critical():
+    """CRITICAL is reserved for silent-corruption-class findings -- an
+    annotate-only structural flag must never claim that reserved meaning,
+    no matter how high theil_u is."""
+    rec = _near_bijection_record(theil_u=1.0)
+    assert rec.severity != IssueSeverity.CRITICAL
+
+
+def test_near_bijection_undeclared_leak_detail_is_not_undeclared_leak_base_subclass():
+    """Deliberately NOT a subclass of _UndeclaredLeakDetailBase (see the
+    struct's own docstring) -- univariate_auc/n_folds_evaluated describe a
+    model-fit-based check (Upgrade 1) and have no meaning for this
+    counting-only, no-estimator check."""
+    rec = _near_bijection_record()
+    detail = rec.evidence.structural_detail
+    assert not hasattr(detail, "univariate_auc")
+    assert not hasattr(detail, "n_folds_evaluated")
+    assert not isinstance(detail, NearCertainUndeclaredLeakDetail)
+
+
+def test_near_bijection_undeclared_leak_round_trips_through_json():
+    rec = _near_bijection_record()
+    dumped = json.loads(rec.model_dump_json())
+    restored = IssueRecord.model_validate(dumped)
+    assert restored.issue_type == IssueType.NEAR_BIJECTION_UNDECLARED_LEAK
+    assert restored.evidence.structural_detail.kind == "near_bijection_undeclared_leak"
+    assert isinstance(restored.evidence.structural_detail, NearBijectionUndeclaredLeakDetail)
+    assert restored.evidence.structural_detail.theil_u == pytest.approx(1.0)
+    assert restored.evidence.structural_detail.support_floor == 2
+    assert restored.evidence.structural_detail.screened_count == 49
+    assert restored.evidence.structural_detail.total_features == 49
+
+
 # ── PROBE_FAILED ────────────────────────────────────────────────────────────────
 
 def _probe_failed_record() -> IssueRecord:
@@ -208,6 +272,7 @@ def test_probe_failed_detail_has_no_raw_traceback_field():
 @pytest.mark.parametrize("kind,cls", [
     ("suspected_undeclared_leak", SuspectedUndeclaredLeakDetail),
     ("near_certain_undeclared_leak", NearCertainUndeclaredLeakDetail),
+    ("near_bijection_undeclared_leak", NearBijectionUndeclaredLeakDetail),
     ("probe_failed", ProbeFailedDetail),
 ])
 def test_probe_detail_union_discriminates_new_kinds_from_bare_dict(kind, cls):
@@ -223,6 +288,12 @@ def test_probe_detail_union_discriminates_new_kinds_from_bare_dict(kind, cls):
                 feature="f", univariate_auc=1.0, threshold_compared_against=0.999,
                 n_folds_evaluated=5, screened_count=10, total_features=10,
                 name_pattern_score=0.0,
+            ),
+            "near_bijection_undeclared_leak": dict(
+                feature="f", theil_u=1.0, support_floor=2,
+                threshold_compared_against=0.99, n_distinct_raw=3,
+                n_distinct_after_pooling=3, n_rows_pooled=0,
+                screened_count=10, total_features=10,
             ),
             "probe_failed": dict(
                 probe_name="p", exception_type="ValueError", message="m",

@@ -85,6 +85,12 @@ class IssueType(str, Enum):
     # backed TEMPORAL_LEAKAGE is. See UPGRADE1_PREREGISTRATION.md.
     SUSPECTED_UNDECLARED_LEAK = "suspected_undeclared_leak"
     NEAR_CERTAIN_UNDECLARED_LEAK = "near_certain_undeclared_leak"
+    # Upgrade (H): near-bijection structural check (deterministic value-to-label
+    # partition via Theil's U, no estimator -- see UPGRADE_H_PREREGISTRATION.md).
+    # Mirrors FORBIDDEN_ENTITY_LEVEL_AGGREGATE's classification (DETECTED_STRUCTURAL,
+    # confirmed=True), NOT the FLAGGED_SUSPICIOUS/confirmed=False pair immediately
+    # above -- a deterministic counting fact, not a model score.
+    NEAR_BIJECTION_UNDECLARED_LEAK = "near_bijection_undeclared_leak"
     # Internal integrity self-check (Zekan's own splitter, not a user finding)
     SPLITTER_CONTRACT_VIOLATION = "splitter_contract_violation"
     # Internal integrity self-check: a structural probe raised during execution
@@ -196,6 +202,15 @@ _REGISTRY: dict[IssueType, _IssueClass] = {
     # never silently corrupts engine_detection/measured_damage/policy_decision.
     IssueType.SUSPECTED_UNDECLARED_LEAK:              _IssueClass(SourceLayer.FLAGGED_SUSPICIOUS, IssueSeverity.MEDIUM,   EvidenceScope.ENGINE_MEASURED, ImpactType.HEURISTIC,         False),
     IssueType.NEAR_CERTAIN_UNDECLARED_LEAK:           _IssueClass(SourceLayer.FLAGGED_SUSPICIOUS, IssueSeverity.HIGH,     EvidenceScope.ENGINE_MEASURED, ImpactType.HEURISTIC,         False),
+    # Upgrade (H) -- mirrors FORBIDDEN_ENTITY_LEVEL_AGGREGATE exactly, NOT the
+    # FLAGGED_SUSPICIOUS pair immediately above: a deterministic value-to-label
+    # partition (Theil's U, post-pooling) is a counting fact about the data, not
+    # a model score, so it earns confirmed=True/DETECTED_STRUCTURAL/DATA_ONLY the
+    # same way a constant-within-entity forbidden feature does. HIGH, not
+    # CRITICAL, for the same reason recorded above for NEAR_CERTAIN: CRITICAL is
+    # reserved for silent-corruption-class findings; this is loud and
+    # annotate-only. See UPGRADE_H_PREREGISTRATION.md / UPGRADE_H_CALIBRATION.md.
+    IssueType.NEAR_BIJECTION_UNDECLARED_LEAK:         _IssueClass(SourceLayer.DETECTED_STRUCTURAL, IssueSeverity.HIGH,     EvidenceScope.DATA_ONLY,       ImpactType.STRUCTURAL_RISK,   True),
     IssueType.SPLITTER_CONTRACT_VIOLATION:           _IssueClass(SourceLayer.ZEKAN_INTEGRITY,    IssueSeverity.CRITICAL, EvidenceScope.SELF_CHECK,      ImpactType.MEASUREMENT_ERROR, True),
     # Mirrors SPLITTER_CONTRACT_VIOLATION on source_layer (ZEKAN_INTEGRITY --
     # this is Zekan reporting its own execution failure, not a user-data
@@ -363,6 +378,35 @@ class NearCertainUndeclaredLeakDetail(_UndeclaredLeakDetailBase):
     # fixed list of suspicious keyword shapes.
 
 
+class NearBijectionUndeclaredLeakDetail(BaseModel):
+    """Evidence for NEAR_BIJECTION_UNDECLARED_LEAK: a non-forbidden feature's
+    values, after rare-value pooling at the calibrated support floor, achieve a
+    Theil's U (uncertainty coefficient) at or above the near-bijection
+    criterion -- the feature's value determines the target almost exactly, as
+    a deterministic counting fact, not a model score. See
+    UPGRADE_H_PREREGISTRATION.md / UPGRADE_H_CALIBRATION.md.
+
+    Deliberately NOT a subclass of _UndeclaredLeakDetailBase: that base's
+    univariate_auc/n_folds_evaluated fields describe a model-fit-based check
+    (Upgrade 1) and have no meaning for this counting-only, whole-frame,
+    no-estimator check -- inheriting them would carry two fields that could
+    never be populated correctly. screened_count/total_features are
+    duplicated directly on this struct instead, same meaning and same
+    "screened X of Y" accounting as the Upgrade 1 base, without inheriting
+    fields that don't apply here.
+    """
+    kind: Literal["near_bijection_undeclared_leak"] = "near_bijection_undeclared_leak"
+    feature: str                        # the non-forbidden feature that was scored
+    theil_u: float                      # post-pooling uncertainty coefficient (Theil's U)
+    support_floor: int                  # minimum per-value support floor applied before scoring
+    threshold_compared_against: float   # the near-bijection threshold this score was judged against
+    n_distinct_raw: int                 # distinct values before pooling
+    n_distinct_after_pooling: int       # distinct values remaining after sub-floor values pooled
+    n_rows_pooled: int                  # rows whose values were merged into the rare bucket
+    screened_count: int                 # features screened this run ("screened X of Y")
+    total_features: int                 # Y in "screened X of Y"
+
+
 class ProbeFailedDetail(BaseModel):
     """Evidence for PROBE_FAILED: a structural probe raised during execution
     and was isolated (audit._run_structural_probes) rather than propagating.
@@ -394,6 +438,7 @@ ProbeDetail = Annotated[
         ForbiddenEntityLevelAggregateDetail,
         SuspectedUndeclaredLeakDetail,
         NearCertainUndeclaredLeakDetail,
+        NearBijectionUndeclaredLeakDetail,
         ProbeFailedDetail,
     ],
     Field(discriminator="kind"),
