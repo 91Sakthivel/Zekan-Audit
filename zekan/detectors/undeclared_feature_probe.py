@@ -47,6 +47,7 @@ from typing import Any, Callable, Optional
 import numpy as np
 import pandas as pd
 
+from zekan.contract.contract_checks import candidate_features
 from zekan.contract.prediction_contract import PredictionContract
 from zekan.detectors.schema import (
     Evidence,
@@ -334,14 +335,7 @@ def probe_undeclared_feature_screen(
         from zekan.severity.metrics import _default_model_factory
         model_factory = _default_model_factory
 
-    excluded = {
-        contract.entity_id,
-        contract.prediction_time,
-        contract.available_features_until,
-        contract.target,
-    }
-    forbidden = set(contract.forbidden_after_prediction or [])
-    candidates = [c for c in df.columns if c not in excluded and c not in forbidden]
+    candidates = candidate_features(contract, df)
     total_features = len(candidates)
 
     if total_features == 0:

@@ -286,3 +286,26 @@ def validate_contract(contract: PredictionContract, df: pd.DataFrame) -> Validat
         _check_row_count_and_folds(contract, df),
     ]
     return ValidationResult(checks=checks)
+
+
+def candidate_features(contract: PredictionContract, df: pd.DataFrame) -> list[str]:
+    """Non-forbidden feature columns under this contract, in `df` column order.
+
+    Excludes the contract's own role columns (entity_id, prediction_time,
+    available_features_until, target) and every declared
+    forbidden_after_prediction column. This is a CONTRACT concept -- which
+    columns count as a screenable feature under a given contract -- shared by
+    every structural probe that screens non-forbidden features (Upgrade 1's
+    undeclared_feature_probe.py, Upgrade (H)'s near_bijection_probe.py), owned
+    by neither. Extracted here (Upgrade H) from what was previously inline,
+    private logic in undeclared_feature_probe.py so a second probe needing the
+    same candidate set would not have to duplicate it.
+    """
+    excluded = {
+        contract.entity_id,
+        contract.prediction_time,
+        contract.available_features_until,
+        contract.target,
+    }
+    forbidden = set(contract.forbidden_after_prediction or [])
+    return [c for c in df.columns if c not in excluded and c not in forbidden]

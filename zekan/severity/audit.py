@@ -72,6 +72,7 @@ def _build_probe_registry() -> list[_ProbeSpec]:
     from zekan.detectors.entity_aggregate_probe import probe_forbidden_entity_level_aggregate
     from zekan.detectors.duplicate_probe import probe_raw_duplicates, probe_cross_fold_duplicates
     from zekan.detectors.undeclared_feature_probe import probe_undeclared_feature_screen
+    from zekan.detectors.near_bijection_probe import probe_near_bijection
 
     return [
         _ProbeSpec(fn=probe_forbidden_entity_level_aggregate, needs_folds=False),
@@ -85,6 +86,10 @@ def _build_probe_registry() -> list[_ProbeSpec]:
             needs_budget=True,     # accepts deadline= for calling-convention parity (unused today)
             needs_side_channel=True,  # ranked panel is NOT an IssueRecord (Upgrade 1 step 1e)
         ),
+        # Upgrade (H): deterministic counting only, no folds/model/matrix/budget/
+        # side_channel -- mirrors probe_forbidden_entity_level_aggregate's
+        # registration exactly, not the Upgrade 1 screen immediately above.
+        _ProbeSpec(fn=probe_near_bijection, needs_folds=False),
     ]
 
 
