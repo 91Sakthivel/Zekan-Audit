@@ -10,7 +10,7 @@ to obtain the actual NSL value the production verdict ladder would assign.
 
 n_entities=2000 (20k rows) matches the default make_clean_dataset scale.
 SplitPolicy (min_test_rows=50, min_pos/neg=10) and n_estimators=30 match
-the benchmark scripts (diag_case3.py, diag_step2.py) so results are directly
+the original calibration benchmark (since removed) so results are directly
 comparable to the known n=500 baseline (min NSL ~1.48 at full-strength leak).
 
 PRIMARY DIAGNOSTIC -- null tightening at scale
@@ -117,7 +117,7 @@ DEFAULT_OUTPUT_PATH: str = "scratch/f2b_calibration.csv"
 # Dataset: 2000 entities x 10 periods = 20 000 rows.
 # row_count_and_folds: 20000 >> 1000 -> PASS.
 # temporal_periods_count: 10 >= 6 -> PASS.
-# SplitPolicy matches benchmark (diag_case3.py): min_test_rows=50, min_pos/neg=10.
+# SplitPolicy matches the original calibration benchmark (since removed): min_test_rows=50, min_pos/neg=10.
 N_ENTITIES: int = 2000
 DATASET_SEED: int = 0
 
@@ -132,7 +132,7 @@ RHO: float = 0.80
 # ---- Helpers -----------------------------------------------------------------
 
 def _clf() -> RandomForestClassifier:
-    # n_estimators=30 matches benchmark scripts (diag_case3.py, diag_step2.py).
+    # n_estimators=30 matches the original calibration benchmark (since removed).
     return RandomForestClassifier(n_estimators=30, random_state=0, n_jobs=1)
 
 

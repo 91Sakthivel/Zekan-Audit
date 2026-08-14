@@ -58,7 +58,7 @@ PERMUTATION COUNT
 -----------------
 Default n_permutations=100.  Stability analysis across the benchmark DGP shows
 the null 95th percentile from two independent batches of 100 agrees within ~0.003
-(see diag_null.py).  100 is the minimum defensible count; 200 adds robustness.
+(measured via the original calibration benchmark, since removed).  100 is the minimum defensible count; 200 adds robustness.
 The null refits only AUC_B per permutation (AUC_C is invariant), so the marginal
 cost is one temporal CV pass per permutation (~4 model fits on the benchmark DGP).
 NOTE (F2a): the ~0.003 figure above was measured under the now-retired serial_v1
