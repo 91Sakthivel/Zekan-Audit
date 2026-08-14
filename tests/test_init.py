@@ -9,7 +9,12 @@ from typer.testing import CliRunner
 
 from zekan.cli import app
 from zekan.config.schema import load_config
-from zekan.init_wizard import build_contract_mapping, validate_mapping, write_config
+from zekan.init_wizard import (
+    build_contract_mapping,
+    resolve_column,
+    validate_mapping,
+    write_config,
+)
 
 runner = CliRunner()
 
@@ -32,6 +37,49 @@ _CSV_CONTENT = textwrap.dedent("""\
 #   available_features_until → col 1
 #   forbidden_after_prediction → empty (Enter)
 _HAPPY_INPUT = "test-problem\n0\n1\n2\n1\n\n"
+
+
+# ── Unit: resolve_column ──────────────────────────────────────────────────────
+
+_RC_COLS = ["entity_id", "prediction_time", "Target", "feature1", "leaky_col"]
+
+
+def test_resolve_column_exact_name():
+    assert resolve_column("entity_id", _RC_COLS) == 0
+
+
+def test_resolve_column_case_insensitive_unambiguous():
+    # "Target" is the only column matching "target" ignoring case.
+    assert resolve_column("target", _RC_COLS) == 2
+
+
+def test_resolve_column_case_ambiguous_returns_none():
+    cols = ["Target", "target", "feature1"]
+    assert resolve_column("TARGET", cols) is None
+
+
+def test_resolve_column_valid_number():
+    assert resolve_column("3", _RC_COLS) == 3
+
+
+def test_resolve_column_out_of_range_number_returns_none():
+    assert resolve_column("99", _RC_COLS) is None
+    assert resolve_column("-1", _RC_COLS) is None
+
+
+def test_resolve_column_whitespace_trimmed():
+    assert resolve_column("  entity_id  ", _RC_COLS) == 0
+    assert resolve_column("  2  ", _RC_COLS) == 2
+
+
+def test_resolve_column_garbage_returns_none():
+    assert resolve_column("not-a-column", _RC_COLS) is None
+    assert resolve_column("1.5", _RC_COLS) is None
+
+
+def test_resolve_column_empty_returns_none():
+    assert resolve_column("", _RC_COLS) is None
+    assert resolve_column("   ", _RC_COLS) is None
 
 
 # ── Unit: build_contract_mapping ──────────────────────────────────────────────
@@ -191,6 +239,105 @@ def test_init_with_forbidden_selection(tmp_path):
 
     # forbidden = col 4 (leaky_col)
     wizard_input = "test-forbidden\n0\n1\n2\n1\n4\n"
+    result = runner.invoke(
+        app,
+        ["init", "--data", str(csv), "--out", str(out)],
+        input=wizard_input,
+    )
+
+    assert result.exit_code == 0, result.output
+    cfg = load_config(out)
+    assert cfg.contract.forbidden_after_prediction == ["leaky_col"]
+
+
+# ── CLI: name-or-number resolution ──────────────────────────────────────────────
+
+def test_init_accepts_column_names_instead_of_numbers(tmp_path):
+    """Every single-select field can be answered with the column name."""
+    csv = tmp_path / "data.csv"
+    out = tmp_path / "zekan.yml"
+    csv.write_text(_CSV_CONTENT, encoding="utf-8")
+
+    wizard_input = "test-names\nentity_id\nprediction_time\ntarget\nprediction_time\n\n"
+    result = runner.invoke(
+        app,
+        ["init", "--data", str(csv), "--out", str(out)],
+        input=wizard_input,
+    )
+
+    assert result.exit_code == 0, result.output
+    cfg = load_config(out)
+    assert cfg.contract.entity_id == "entity_id"
+    assert cfg.contract.prediction_time == "prediction_time"
+    assert cfg.contract.target == "target"
+    assert cfg.contract.available_features_until == "prediction_time"
+
+
+def test_init_case_insensitive_name_resolves(tmp_path):
+    """An unambiguous case-insensitive name match is accepted."""
+    csv = tmp_path / "data.csv"
+    out = tmp_path / "zekan.yml"
+    csv.write_text(_CSV_CONTENT, encoding="utf-8")
+
+    wizard_input = "test-case\nENTITY_ID\nprediction_time\ntarget\nprediction_time\n\n"
+    result = runner.invoke(
+        app,
+        ["init", "--data", str(csv), "--out", str(out)],
+        input=wizard_input,
+    )
+
+    assert result.exit_code == 0, result.output
+    cfg = load_config(out)
+    assert cfg.contract.entity_id == "entity_id"
+
+
+def test_init_forbidden_accepts_mixed_names_and_numbers(tmp_path):
+    """forbidden_after_prediction resolves a mix of names and numbers."""
+    csv = tmp_path / "data.csv"
+    out = tmp_path / "zekan.yml"
+    csv.write_text(_CSV_CONTENT, encoding="utf-8")
+
+    # forbidden = "feature1" (name, col 3) + "4" (number, leaky_col)
+    wizard_input = "test-mixed\n0\n1\n2\n1\nfeature1,4\n"
+    result = runner.invoke(
+        app,
+        ["init", "--data", str(csv), "--out", str(out)],
+        input=wizard_input,
+    )
+
+    assert result.exit_code == 0, result.output
+    cfg = load_config(out)
+    assert cfg.contract.forbidden_after_prediction == ["feature1", "leaky_col"]
+
+
+def test_init_unrecognized_input_reprompts_single_select(tmp_path):
+    """A bad token on a single-select field re-prompts rather than crashing."""
+    csv = tmp_path / "data.csv"
+    out = tmp_path / "zekan.yml"
+    csv.write_text(_CSV_CONTENT, encoding="utf-8")
+
+    # entity_id: "bogus" (invalid) then "0" (valid) on re-prompt.
+    wizard_input = "test-reprompt\nbogus\n0\n1\n2\n1\n\n"
+    result = runner.invoke(
+        app,
+        ["init", "--data", str(csv), "--out", str(out)],
+        input=wizard_input,
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "is not a column name or a number" in result.output
+    cfg = load_config(out)
+    assert cfg.contract.entity_id == "entity_id"
+
+
+def test_init_forbidden_bad_token_reprompts_whole_field(tmp_path):
+    """A bad token in the forbidden list re-prompts the WHOLE field, not just the token."""
+    csv = tmp_path / "data.csv"
+    out = tmp_path / "zekan.yml"
+    csv.write_text(_CSV_CONTENT, encoding="utf-8")
+
+    # forbidden: "badtoken" (invalid, whole field re-prompted) then "4" (valid, whole field).
+    wizard_input = "test-forbidden-reprompt\n0\n1\n2\n1\nbadtoken\n4\n"
     result = runner.invoke(
         app,
         ["init", "--data", str(csv), "--out", str(out)],

@@ -8,6 +8,31 @@ from typing import Optional
 import yaml
 
 
+def resolve_column(raw: str, cols: list[str]) -> Optional[int]:
+    """Resolve user-typed input to a column index: exact name, then unambiguous
+    case-insensitive name, then integer index. No fuzzy/partial matching --
+    returns None (never a guess) whenever nothing resolves unambiguously,
+    including when a case-insensitive match hits more than one column.
+    """
+    raw = raw.strip()
+    if not raw:
+        return None
+    if raw in cols:
+        return cols.index(raw)
+    ci_matches = [i for i, c in enumerate(cols) if c.lower() == raw.lower()]
+    if len(ci_matches) == 1:
+        return ci_matches[0]
+    if len(ci_matches) > 1:
+        return None
+    try:
+        idx = int(raw)
+    except ValueError:
+        return None
+    if 0 <= idx < len(cols):
+        return idx
+    return None
+
+
 def build_contract_mapping(
     prediction_problem: str,
     entity_id: str,

@@ -531,7 +531,12 @@ def init(
     import pandas as pd
     from pydantic import ValidationError
 
-    from zekan.init_wizard import build_contract_mapping, validate_mapping, write_config
+    from zekan.init_wizard import (
+        build_contract_mapping,
+        resolve_column,
+        validate_mapping,
+        write_config,
+    )
 
     # ── load data (same block as _run_audit_pipeline) ─────────────────────────
     data_path = Path(data)
@@ -559,39 +564,46 @@ def init(
         for i, c in enumerate(cols):
             typer.echo(f"    [{i}] {c}")
 
+    def _unresolved_error(raw: str) -> str:
+        case_matches = [c for c in cols if c.lower() == raw.strip().lower()]
+        if len(case_matches) > 1:
+            return f"  ERROR: '{raw}' matches more than one column by case; type the exact name."
+        return (
+            f"  ERROR: '{raw}' is not a column name or a number in 0-{len(cols) - 1}."
+            " Type the column name or its number."
+        )
+
     def _pick_one(field_name: str) -> str:
         while True:
             _show_menu()
-            raw = typer.prompt(f"  Select {field_name} (0-{len(cols) - 1})")
-            try:
-                idx = int(raw.strip())
-                if 0 <= idx < len(cols):
-                    return cols[idx]
-            except ValueError:
-                pass
-            typer.echo(f"  ERROR: enter a number between 0 and {len(cols) - 1}.")
+            raw = typer.prompt(f"  Select {field_name} (name or number, 0-{len(cols) - 1})")
+            idx = resolve_column(raw, cols)
+            if idx is not None:
+                return cols[idx]
+            typer.echo(_unresolved_error(raw))
 
     def _pick_many(field_name: str) -> list[str]:
         while True:
             _show_menu()
             raw = typer.prompt(
-                f"  Select {field_name} (comma-separated numbers, empty for none)",
+                f"  Select {field_name} (names or numbers, comma-separated, empty for none)",
                 default="",
             )
             raw = raw.strip()
             if not raw:
                 return []
-            try:
-                parts = [x.strip() for x in raw.split(",") if x.strip()]
-                indices = [int(x) for x in parts]
-                if all(0 <= idx < len(cols) for idx in indices):
-                    return [cols[idx] for idx in indices]
-            except ValueError:
-                pass
-            typer.echo(
-                f"  ERROR: enter comma-separated numbers between 0 and {len(cols) - 1},"
-                " or leave empty."
-            )
+            tokens = [x.strip() for x in raw.split(",") if x.strip()]
+            resolved: list[int] = []
+            bad_token: str | None = None
+            for token in tokens:
+                idx = resolve_column(token, cols)
+                if idx is None:
+                    bad_token = token
+                    break
+                resolved.append(idx)
+            if bad_token is None:
+                return [cols[i] for i in resolved]
+            typer.echo(_unresolved_error(bad_token))
 
     # ── prompts ───────────────────────────────────────────────────────────────
     typer.echo(f"\nZekan init — {len(cols)} columns found in {data_path.name}")
