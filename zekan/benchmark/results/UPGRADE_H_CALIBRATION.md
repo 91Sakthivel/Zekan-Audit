@@ -313,7 +313,7 @@ Regenerate via the scratch-only script (not committed, same convention as
 
 Requires `testB1_specificity.csv`, `testB2_sensitivity.csv`, and
 `testB3_honest_unknown.csv` (the full 101,766-row Test B frames) at
-`C:\Users\Hp\Downloads\diabetes+130-us+hospitals+for+years+1999-2008\` —
+`<DATA_DIR>/` —
 these are external to the repo, same convention as every prior Test B
 calibration document.
 
