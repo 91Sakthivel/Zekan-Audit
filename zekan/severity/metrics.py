@@ -55,6 +55,7 @@ def _feature_matrix(
     df: pd.DataFrame,
     feature_cols: list[str],
     categorical_map: Optional[dict[str, dict]] = None,
+    unseen_counts: Optional[dict[str, int]] = None,
 ) -> np.ndarray:
     """Cast feature columns to a single float32 array, once.
 
@@ -82,13 +83,16 @@ def _feature_matrix(
         builds one, so calling it repeatedly (e.g. once from engine.py's
         X_all_full and again from null_baseline.py's X_base within the same
         audit) never redoes the sorted-unique derivation. Default None
-        preserves every existing caller's behavior exactly -- CALLERS DO NOT
-        YET PASS THIS (CATEGORICAL_SUPPORT_PREREGISTRATION.md step 2 of 3;
-        engine.py's own call is wired to build and pass a real map in step 3).
+        preserves every existing caller's behavior exactly -- step 3 wires
+        engine.py's own call to build and pass a real map.
+    unseen_counts
+        Passed straight through to apply_categorical_mapping (see its own
+        unseen_counts docstring) when categorical_map is given. Ignored
+        (nothing to count) when categorical_map is empty/None.
     """
     if categorical_map:
         from zekan.contract.contract_checks import apply_categorical_mapping
-        df = apply_categorical_mapping(df, categorical_map)
+        df = apply_categorical_mapping(df, categorical_map, unseen_counts=unseen_counts)
     try:
         return df[feature_cols].to_numpy(dtype=np.float32)
     except (ValueError, TypeError) as e:

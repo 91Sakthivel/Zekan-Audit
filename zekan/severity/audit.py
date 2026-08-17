@@ -317,6 +317,10 @@ def run_audit(
         _updates["structural_annotations"] = annotations
     if _panel is not None:
         _updates["undeclared_feature_panel"] = _panel
+    if severity_result.categorical_encoding is not None:
+        _updates["categorical_encoding"] = severity_result.categorical_encoding
+    if severity_result.categorical_unseen_counts is not None:
+        _updates["categorical_unseen_counts"] = severity_result.categorical_unseen_counts
     if _updates:
         report = report.model_copy(update=_updates)
 

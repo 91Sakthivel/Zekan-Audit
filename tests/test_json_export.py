@@ -228,6 +228,8 @@ def test_no_numpy_types_failed(failed_report):
 # ── Every key always present ──────────────────────────────────────────────────
 
 _TOP_LEVEL_KEYS = {
+    "categorical_encoding",       # CATEGORICAL_SUPPORT_PREREGISTRATION.md 3(e); None when no categorical column was declared/encoded
+    "categorical_unseen_counts",  # ditto; None when no declared column had an unseen value
     "engine_detection",
     "fold_ci",
     "gate",           # added by CLI, not by verdict_to_dict — tested separately

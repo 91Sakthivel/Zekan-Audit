@@ -752,3 +752,129 @@ def test_audit_no_estimator_json_is_deterministic(tmp_path, monkeypatch):
     assert r1.exit_code == 0, r1.output
     assert r2.exit_code == 0, r2.output
     assert r1.stdout == r2.stdout
+
+
+# ── Categorical support Part B: gates on contract failure ──────────────────────
+# CATEGORICAL_SUPPORT_PREREGISTRATION.md section 2/3(c): a structural probe
+# whose own precondition is just a dataframe and a contract (Upgrade H) must
+# still run when the contract fails feature_columns_numeric; a probe that
+# needs temporal folds (Upgrade 1) must not; the exit code stays non-zero;
+# and no VerdictReport -- so no PASS-shaped verdict -- is ever built on this
+# path.
+
+_FAILED_NUMERIC_CONFIG = textwrap.dedent("""\
+    contract:
+      prediction_problem: cli-test-failed-numeric
+      entity_id: entity_id
+      prediction_time: prediction_time
+      target: target
+      available_features_until: prediction_time
+""")
+
+
+def _failed_contract_dataset():
+    """A clean panel plus one extra RAW STRING feature column that is a
+    deterministic, noise-free copy of `target` -- undeclared (no
+    categorical_features in _FAILED_NUMERIC_CONFIG), so it both fails
+    feature_columns_numeric (raw text, not castable to float) and gives
+    Upgrade H's near-bijection probe a genuine Theil's U ~= 1.0 to find."""
+    df = make_clean_dataset(n_entities=_N_ENTITIES, snapshots_per_entity=_SNAPSHOTS, seed=1)
+    df = df.copy()
+    df["leak_as_text"] = df["target"].map({0: "class_zero", 1: "class_one"})
+    return df
+
+
+def _write_failed_contract_fixture(tmp_path):
+    df = _failed_contract_dataset()
+    csv = tmp_path / "data.csv"
+    cfg = tmp_path / "zekan.yml"
+    df.to_csv(csv, index=False)
+    cfg.write_text(_FAILED_NUMERIC_CONFIG)
+    return csv, cfg
+
+
+def test_failed_contract_still_runs_upgrade_h(tmp_path, monkeypatch):
+    """feature_columns_numeric FAILS on leak_as_text, but Upgrade H's own
+    precondition (a dataframe and a contract) is unaffected -- it must still
+    run and report the near-bijection column by name."""
+    monkeypatch.setattr("zekan.severity.metrics._default_model_factory", _fast_clf)
+    csv, cfg = _write_failed_contract_fixture(tmp_path)
+
+    result = runner.invoke(app, ["audit", "--data", str(csv), "--config", str(cfg)])
+
+    assert "CONTRACT FAILED" in result.output
+    assert "feature_columns_numeric" in result.output
+    assert "NEAR_BIJECTION_UNDECLARED_LEAK" in result.output, result.output
+    assert "leak_as_text" in result.output
+
+
+def test_failed_contract_does_not_run_upgrade_1(tmp_path, monkeypatch):
+    """Same failed contract: probe_undeclared_feature_screen (Upgrade 1) must
+    never be CALLED -- proven by spying on the function itself, since "ran
+    and found nothing" and "was skipped" both produce zero visible output,
+    so scanning result.output alone couldn't tell them apart."""
+    monkeypatch.setattr("zekan.severity.metrics._default_model_factory", _fast_clf)
+    calls: list = []
+
+    def _spy(*args, **kwargs):
+        calls.append((args, kwargs))
+        return []
+
+    monkeypatch.setattr(
+        "zekan.detectors.undeclared_feature_probe.probe_undeclared_feature_screen", _spy
+    )
+    csv, cfg = _write_failed_contract_fixture(tmp_path)
+
+    runner.invoke(app, ["audit", "--data", str(csv), "--config", str(cfg)])
+
+    assert calls == [], (
+        "probe_undeclared_feature_screen (Upgrade 1) was called despite folds=None "
+        "-- it needs numeric features via temporal folds, which a failed contract "
+        "cannot provide"
+    )
+
+
+def test_failed_contract_exits_nonzero(tmp_path, monkeypatch):
+    """Exit code stays non-zero on contract failure, exactly as before this
+    change -- running structural probes must not soften the failure."""
+    monkeypatch.setattr("zekan.severity.metrics._default_model_factory", _fast_clf)
+    csv, cfg = _write_failed_contract_fixture(tmp_path)
+
+    result = runner.invoke(app, ["audit", "--data", str(csv), "--config", str(cfg)])
+
+    assert result.exit_code == 1, result.output
+
+
+def test_failed_contract_never_builds_verdict_report(tmp_path, monkeypatch):
+    """No PASS-shaped verdict is ever emitted on a failed contract. Proven two
+    ways: (1) run_audit -- the only function that can construct a
+    VerdictReport -- is spied on and must never be called, a stronger
+    guarantee than scanning text, since build_verdict's own unavailable-status
+    branch sets policy_decision.verdict="PASS" for OTHER callers (pinned by
+    test_verdict.py::test_unavailable_engine_result) and that string must
+    never reach this path; (2) none of the verdict marker strings a real
+    TRUSTED/RISKY/FAILED render_verdict() call would print appear in output
+    (a bare "PASS" substring check would be defeated by the per-check
+    "[PASS]" lines the contract table already prints for every check that DID
+    pass, e.g. entity_id_exists -- so the marker strings are checked
+    specifically, not the bare word)."""
+    monkeypatch.setattr("zekan.severity.metrics._default_model_factory", _fast_clf)
+    run_audit_calls: list = []
+
+    def _spy_run_audit(*args, **kwargs):
+        run_audit_calls.append((args, kwargs))
+        raise RuntimeError("run_audit must not be reached on a failed contract")
+
+    monkeypatch.setattr("zekan.severity.audit.run_audit", _spy_run_audit)
+    csv, cfg = _write_failed_contract_fixture(tmp_path)
+
+    result = runner.invoke(app, ["audit", "--data", str(csv), "--config", str(cfg)])
+
+    assert run_audit_calls == [], (
+        "run_audit() was called on a failed contract -- a VerdictReport "
+        "(and its PASS-shaped policy_decision.verdict) could have been built"
+    )
+    assert "✓ TRUSTED" not in result.output
+    assert "TRUSTED" not in result.output
+    assert "⚠ RISKY" not in result.output
+    assert "✗ FAILED" not in result.output

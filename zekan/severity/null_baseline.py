@@ -553,11 +553,20 @@ def estimate_fixable_leakage_null(
     verbose: bool = False,
     n_jobs: int = 1,
     stopping: str = "fixed_v1",
+    categorical_map: Optional[dict[str, dict]] = None,
 ) -> NullResult:
     """Estimate the permutation null distribution for fixable_leakage.
 
     Parameters
     ----------
+    categorical_map
+        Optional {column: {"codes": ..., "nan_sentinel": ...}} mapping (see
+        contract_checks.build_categorical_mapping), the SAME object engine.py
+        built once for the whole audit and used for X_all_full -- passed
+        through here (not re-derived) so every feature-matrix rebuild this
+        function does internally (X_base, and every evaluate_folds call that
+        doesn't reuse a pre-built matrix) uses the identical encoding.
+        Default None preserves every existing caller's behavior exactly.
     observed_fixable_leakage
         The fixable_leakage value from the unmodified engine run.
         Used only to compute the p-value; does not affect null sampling.
@@ -747,7 +756,7 @@ def estimate_fixable_leakage_null(
         # Pre-compute once and reuse across every permutation draw.
         eval_c = evaluate_folds(
             df, safe_feature_cols, contract.target, temp_folds, model_factory,
-            return_predictions=True,
+            return_predictions=True, categorical_map=categorical_map,
         )
         y_pool, proba_c_pool = _pool_oof_predictions(eval_c.fold_evals, interior_fold_idxs)
         if y_pool is None:
@@ -760,7 +769,7 @@ def estimate_fixable_leakage_null(
         # let _null_permutation_once patch just those columns per draw,
         # instead of copying the whole dataframe and re-deriving the matrix
         # from scratch on every one of the n_permutations calls below.
-        X_base = _feature_matrix(df, all_feature_cols)
+        X_base = _feature_matrix(df, all_feature_cols, categorical_map=categorical_map)
         y_all = df[contract.target].to_numpy()
         forbidden_col_positions = [all_feature_cols.index(c) for c in forbidden_cols]
         if method == "within_entity":
@@ -952,11 +961,11 @@ def estimate_fixable_leakage_null(
             )
             eval_b_perm = evaluate_folds(
                 df_perm, all_feature_cols, contract.target, temp_folds, model_factory,
-                return_predictions=True,
+                return_predictions=True, categorical_map=categorical_map,
             )
             eval_c_perm = evaluate_folds(
                 df_perm, safe_feature_cols, contract.target, temp_folds, model_factory,
-                return_predictions=True,
+                return_predictions=True, categorical_map=categorical_map,
             )
             auc_b = _pool_oof_auc(eval_b_perm.fold_evals, interior_fold_idxs)
             auc_c = _pool_oof_auc(eval_c_perm.fold_evals, interior_fold_idxs)

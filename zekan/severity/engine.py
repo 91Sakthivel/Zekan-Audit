@@ -28,7 +28,7 @@ import pandas as pd
 from sklearn.metrics import roc_auc_score
 
 from zekan.config.schema import ZekanConfig
-from zekan.contract.contract_checks import validate_contract
+from zekan.contract.contract_checks import build_categorical_mapping, validate_contract
 from zekan.contract.prediction_contract import PredictionContract
 from zekan.severity.metrics import _feature_matrix, evaluate_folds
 from zekan.severity.splitters import random_grouped_folds, temporal_expanding_folds
@@ -114,6 +114,15 @@ class SeverityResult:
     all_features: Optional[list[str]] = None
     X_all: Optional[np.ndarray] = None
     y_all: Optional[np.ndarray] = None
+    # CATEGORICAL_SUPPORT_PREREGISTRATION.md step 3: built once here (see
+    # build_categorical_mapping call below), applied to X_all_full before the
+    # float32 cast, and carried out via SeverityResult the same way
+    # all_features/X_all/y_all already are, so run_audit()/cli.py can promote
+    # them onto VerdictReport/provenance without re-deriving anything. None on
+    # the status="unavailable" early-return path -- no mapping is ever built
+    # when severity can't be computed.
+    categorical_encoding: Optional[dict] = None
+    categorical_unseen_counts: Optional[dict[str, int]] = None
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -260,7 +269,18 @@ def run_severity_analysis(
     # explicit position list (not a mask) reproduces the exact column order any
     # feature_cols list specifies, so this is safe for every estimator, not just
     # the ones that happen to be order-invariant.
-    X_all_full = _feature_matrix(df, all_features)
+    # CATEGORICAL_SUPPORT_PREREGISTRATION.md step 3: built ONCE per audit,
+    # from the contract's own declaration -- never re-derived downstream.
+    # Reused as-is for the permutation null below (estimate_fixable_leakage_null's
+    # own categorical_map kwarg), so every feature-matrix derivation within
+    # this one audit uses the identical mapping.
+    categorical_map = build_categorical_mapping(df, contract.categorical_features)
+    categorical_unseen_counts: dict[str, int] = {}
+    X_all_full = _feature_matrix(
+        df, all_features,
+        categorical_map=categorical_map,
+        unseen_counts=categorical_unseen_counts,
+    )
     y_all = df[contract.target].to_numpy()
     _col_pos = {f: i for i, f in enumerate(all_features)}
     safe_positions = [_col_pos[f] for f in safe_features]
@@ -439,6 +459,7 @@ def run_severity_analysis(
             method="within_entity",
             n_jobs=n_jobs,
             stopping=null_stopping,
+            categorical_map=categorical_map,
         )
         null_95th = _null.null_95th
         null_99th = _null.null_99th
@@ -472,6 +493,7 @@ def run_severity_analysis(
             method="across_entity",
             n_jobs=n_jobs,
             stopping=null_stopping,
+            categorical_map=categorical_map,
         )
         if _null_across.n_permutations > 0:
             null_95th_across = _null_across.null_95th
@@ -520,6 +542,8 @@ def run_severity_analysis(
         all_features=all_features,
         X_all=X_all_full,
         y_all=y_all,
+        categorical_encoding=categorical_map or None,
+        categorical_unseen_counts=categorical_unseen_counts or None,
     )
 
 

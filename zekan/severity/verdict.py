@@ -329,6 +329,29 @@ class VerdictReport(BaseModel):
     instead.
     """
 
+    categorical_encoding: Optional[dict] = None
+    """CATEGORICAL_SUPPORT_PREREGISTRATION.md 3(e) -- the {column: {"codes":
+    ..., "nan_sentinel": ...}} ordinal-encoding map actually applied to
+    declared categorical_features for this audit (see
+    contract_checks.build_categorical_mapping), promoted from
+    SeverityResult.categorical_encoding by run_audit(). None when no
+    categorical column was declared/encoded. Same object also threads into
+    provenance (build_provenance's categorical_encoding param) -- this field
+    is the human/JSON-facing copy on the report itself.
+    """
+
+    categorical_unseen_counts: Optional[dict[str, int]] = None
+    """"Silence is not clearance": {column: n_unseen} for every declared
+    categorical column where one or more values were absent from that
+    column's codes and mapped to NaN (see
+    contract_checks.apply_categorical_mapping's unseen_counts param).
+    Promoted from SeverityResult.categorical_unseen_counts by run_audit().
+    None when no categorical column was declared, or every declared column's
+    values were all seen at mapping-build time. A separate, human-facing
+    finding from categorical_encoding above -- this is a count of a problem,
+    not a reproducibility artifact.
+    """
+
     def __str__(self) -> str:
         from zekan.reports.text_view import render_verdict
         return render_verdict(self)
@@ -465,11 +488,20 @@ def _make_unconfirmed_report(
     fold_ci: FoldCI,
     structural_annotations: list | None = None,
     undeclared_feature_panel: Any = None,
+    categorical_encoding: Optional[dict] = None,
+    categorical_unseen_counts: Optional[dict[str, int]] = None,
 ) -> VerdictReport:
     """Canonical UNCONFIRMED_HIGH_DAMAGE report factory.
 
     Both the fold-starved gate (spec 4) and the seed-stability downgrade (spec 3)
     route through this function so they produce the same VerdictReport shape.
+    categorical_encoding/categorical_unseen_counts default None here (same as
+    structural_annotations/undeclared_feature_panel): the fold-starved gate
+    call (inside build_verdict) doesn't know them yet -- run_audit()'s own
+    model_copy(update=_updates) step sets them afterward regardless. The
+    seed-stability call (_apply_seed_stability, below) DOES know them by the
+    time it runs and passes the primary report's values through explicitly,
+    so an unstable-verdict downgrade doesn't silently drop them.
     """
     return VerdictReport(
         engine_detection=engine_detection,
@@ -478,6 +510,8 @@ def _make_unconfirmed_report(
         fold_ci=fold_ci,
         structural_annotations=structural_annotations or [],
         undeclared_feature_panel=undeclared_feature_panel,
+        categorical_encoding=categorical_encoding,
+        categorical_unseen_counts=categorical_unseen_counts,
     )
 
 
@@ -856,4 +890,6 @@ def _apply_seed_stability(
         fold_ci=_unstable_fold_ci,
         structural_annotations=list(primary_report.structural_annotations),
         undeclared_feature_panel=primary_report.undeclared_feature_panel,
+        categorical_encoding=primary_report.categorical_encoding,
+        categorical_unseen_counts=primary_report.categorical_unseen_counts,
     )

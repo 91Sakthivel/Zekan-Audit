@@ -126,6 +126,32 @@ def _run_audit_pipeline(
             f"CONTRACT FAILED: {', '.join(failed)}, severity will not be computed.",
             err=json_mode,
         )
+        # CATEGORICAL_SUPPORT_PREREGISTRATION.md section 2/3(c): a structural
+        # probe whose own precondition is just a dataframe and a contract
+        # (Upgrade H / probe_near_bijection, plus probe_forbidden_entity_level_
+        # aggregate and probe_raw_duplicates) does not need feature_columns_
+        # numeric -- or any other check -- to have passed. Run those directly
+        # via _run_structural_probes rather than through run_audit()/
+        # build_verdict(): folds=None makes that function's own existing
+        # needs_folds gate skip every probe that genuinely needs numeric
+        # features via temporal folds (Upgrade 1, probe_cross_fold_duplicates)
+        # -- no new gating logic, reusing what's already there. Deliberately
+        # NOT routed through build_verdict(): its status="unavailable" branch
+        # sets policy_decision.verdict="PASS" (verdict.py, pinned by
+        # test_verdict.py::test_unavailable_engine_result for OTHER callers --
+        # not touched here), which would be a PASS-shaped verdict on a
+        # contract that just failed. No VerdictReport is ever built on this
+        # path, so there is nothing that could leak one. Exit code stays
+        # non-zero exactly as before; severity is never computed.
+        from zekan.severity.audit import _run_structural_probes
+        _structural = _run_structural_probes(df, cfg.contract, folds=None)
+        if _structural:
+            typer.echo(
+                "Structural probes (contract-independent -- ran despite contract failure):",
+                err=json_mode,
+            )
+            for _rec in _structural:
+                typer.echo(f"  [{_rec.status}]  {_rec.issue_type}: {_rec.what}", err=json_mode)
         raise typer.Exit(1)
 
     # ── pre-flight data sanity check ─────────────────────────────────────────
@@ -195,6 +221,18 @@ def _run_audit_pipeline(
             err=json_mode,
         )
 
+    # CATEGORICAL_SUPPORT_PREREGISTRATION.md 3(e)/step 3: "silence is not
+    # clearance" -- an unseen category quietly becoming NaN belongs where a
+    # human reading the run actually looks, not just inside provenance (which
+    # is a reproducibility artifact, not a findings surface). Mirrors how
+    # FoldCI.skip_reasons / UndeclaredFeaturePanel.not_screenable already
+    # surface counts as their own printed lines rather than folding them into
+    # provenance.
+    if _report.categorical_unseen_counts:
+        typer.echo("Categorical encoding: unseen values (not in the training mapping):", err=json_mode)
+        for _col, _n in _report.categorical_unseen_counts.items():
+            typer.echo(f"  '{_col}': {_n} value(s)", err=json_mode)
+
     from zekan.detectors.undeclared_feature_probe import SCREEN_VERSION as _undeclared_screen_version
 
     _provenance = build_provenance(
@@ -207,6 +245,7 @@ def _run_audit_pipeline(
         null_scheme="spawn_v2",
         null_stopping=_null_stopping_mode,
         undeclared_screen=_undeclared_screen_version,
+        categorical_encoding=_report.categorical_encoding,
     )
     return _report, _provenance
 
