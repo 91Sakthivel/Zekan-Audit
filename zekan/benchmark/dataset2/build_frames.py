@@ -114,8 +114,25 @@ def build_frame_table(perf: pd.DataFrame, orig: pd.DataFrame) -> tuple[pd.DataFr
         if loan_id not in per_loan_max_ordinal or ordv > per_loan_max_ordinal[loan_id]:
             per_loan_max_ordinal[loan_id] = ordv
 
+    # ── Per-loan termination status (Addendum 05 section 4) ─────────────────
+    # A loan TERMINATED if its final record (row at the loan's max ordinal)
+    # carries a non-blank Zero Balance Code after stripping. Terminated loans
+    # are not censored: periods after termination are observed (with no
+    # further event), so windows extending past them are labelled, not
+    # dropped. Loans with no terminal code remain genuinely censored.
+    per_loan_terminated: dict[str, bool] = {
+        loan_id: per_loan[loan_id][max_ord][2] != ""
+        for loan_id, max_ord in per_loan_max_ordinal.items()
+    }
+    n_loans_terminated = sum(per_loan_terminated.values())
+    n_loans_censored = len(per_loan_terminated) - n_loans_terminated
+    stats["n_loans_terminated"] = n_loans_terminated
+    stats["n_loans_censored"] = n_loans_censored
+
     # ── Row-by-row labelling ────────────────────────────────────────────────
     n_dropped_incomplete_window = 0
+    n_dropped_censored_window = 0
+    n_dropped_other = 0
     n_ra_in_label_windows = 0
     keep_mask: list[bool] = []
     target_delinquency: list[int] = []
@@ -124,11 +141,12 @@ def build_frame_table(perf: pd.DataFrame, orig: pd.DataFrame) -> tuple[pd.DataFr
     for loan_id, ordv in zip(perf[LOAN_ID_FIELD], ordinals):
         max_ord = per_loan_max_ordinal[loan_id]
         window_end = ordv + HORIZON_MONTHS
-        if window_end > max_ord:
+        if window_end > max_ord and not per_loan_terminated[loan_id]:
             keep_mask.append(False)
             target_delinquency.append(None)
             target_creditevent.append(None)
             n_dropped_incomplete_window += 1
+            n_dropped_censored_window += 1
             continue
 
         loan_periods = per_loan[loan_id]
@@ -152,6 +170,8 @@ def build_frame_table(perf: pd.DataFrame, orig: pd.DataFrame) -> tuple[pd.DataFr
         n_ra_in_label_windows += ra_in_window
 
     stats["n_dropped_incomplete_window"] = n_dropped_incomplete_window
+    stats["n_dropped_censored_window"] = n_dropped_censored_window
+    stats["n_dropped_other"] = n_dropped_other
     stats["n_ra_in_label_windows"] = n_ra_in_label_windows
 
     labelled = perf.copy()
@@ -243,6 +263,11 @@ def main() -> None:
           f"{stats['n_dropped_incomplete_window']}")
     print(f"RA rows encountered inside label windows (labelled anchors only): "
           f"{stats['n_ra_in_label_windows']}")
+    print(f"loans classified as terminated: {stats['n_loans_terminated']}")
+    print(f"loans classified as censored (no terminal Zero Balance Code): "
+          f"{stats['n_loans_censored']}")
+    print(f"rows dropped - censored-loan window: {stats['n_dropped_censored_window']}")
+    print(f"rows dropped - other reason: {stats['n_dropped_other']}")
 
     print("\n=== Join check ===")
     print(f"performance rows that failed to join an origination row: "
