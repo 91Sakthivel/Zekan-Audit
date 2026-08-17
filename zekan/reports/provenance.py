@@ -88,6 +88,7 @@ def build_provenance(
     null_scheme: str = "spawn_v2",
     null_stopping: str = "fixed_v1",
     undeclared_screen: str = "univariate_v1",
+    categorical_encoding: Optional[dict] = None,
 ) -> dict:
     """Return a deterministic provenance dict — NO timestamp.
 
@@ -114,6 +115,26 @@ def build_provenance(
         that absence as "none" (no screen ran), never guessed to match the
         other side.  A top-level provenance key (not nested under "seed" --
         unlike null_scheme/null_stopping, this isn't a seeding concern).
+    categorical_encoding
+        The {column: {"codes": {raw_value: code}, "nan_sentinel": str}}
+        ordinal-encoding map actually applied to declared
+        categorical_features for this audit (see
+        contract_checks.build_categorical_mapping), or None when no
+        categorical column was declared/encoded (the default -- every caller
+        before CATEGORICAL_SUPPORT_PREREGISTRATION.md step 3 wiring passes
+        nothing here).  The per-column nan_sentinel is included alongside
+        codes because it is required to reproduce the encoding exactly: it
+        is picked per column (collision-avoided against that column's own
+        real values, see contract_checks._pick_nan_sentinel), so a reader
+        cannot assume a fixed sentinel string -- reproducing which raw value
+        a given code came from requires the sentinel actually used for that
+        column, not a guessed default.  Additive field -- JSON produced
+        before categorical support has no categorical_encoding key at all;
+        `zekan diff` should treat that absence as "no encoding was applied"
+        (equivalent to None), never guessed to match the other side.
+        Without this, a --json result computed from encoded categorical
+        columns is not independently reproducible: a reader has no way to
+        map the audited float32 codes back to the original category values.
     """
     return {
         "contract_sha256": contract_hash,
@@ -126,6 +147,7 @@ def build_provenance(
             "null_stopping": null_stopping,
         },
         "undeclared_screen": undeclared_screen,
+        "categorical_encoding": categorical_encoding,
         "versions": versions,
     }
 

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
+from typing import Optional
 
 import pandas as pd
 
@@ -202,7 +203,13 @@ def _check_cost_model(c: PredictionContract, df: pd.DataFrame) -> CheckResult:
 
 
 def _check_feature_columns_numeric(c: PredictionContract, df: pd.DataFrame) -> CheckResult:
-    """Every feature column must be castable to float for EVERY row.
+    """Every feature column must be castable to float for EVERY row, UNLESS
+    it is declared in contract.categorical_features (CATEGORICAL_SUPPORT_
+    PREREGISTRATION.md 3(a)/3(b)): a declared column is ordinal-encoded
+    before the cast (see build_categorical_mapping/apply_categorical_mapping
+    below), so it is exempted from this coercion requirement -- the encoding
+    step is what makes it numeric by the time evaluate_folds runs, not this
+    check.
 
     evaluate_folds (metrics.py) does df[feature_cols].to_numpy(dtype=float) on
     the whole feature block at once for every fold -- a single non-numeric
@@ -215,13 +222,17 @@ def _check_feature_columns_numeric(c: PredictionContract, df: pd.DataFrame) -> C
     except entity_id, prediction_time, available_features_until, and target).
     forbidden_after_prediction columns are NOT excluded here: engine.py still
     includes them in model A/B's "all_features" set, so they must be numeric
-    too, not just the columns that end up in model C's "safe_features".
+    (or declared categorical) too, not just the columns that end up in model
+    C's "safe_features".
     """
     excluded = {c.entity_id, c.prediction_time, c.available_features_until, c.target}
     feature_cols = [col for col in df.columns if col not in excluded]
+    declared_categorical = set(c.categorical_features)
 
     bad_cols: dict[str, int] = {}
     for col in feature_cols:
+        if col in declared_categorical:
+            continue
         coerced = pd.to_numeric(df[col], errors="coerce")
         n_bad = int((coerced.isna() & ~df[col].isna()).sum())
         if n_bad > 0:
@@ -233,13 +244,20 @@ def _check_feature_columns_numeric(c: PredictionContract, df: pd.DataFrame) -> C
         detail = ", ".join(f"'{col}' ({bad_cols[col]} value(s))" for col in shown)
         if len(names) > 10:
             detail += f", and {len(names) - 10} more"
+        # Actionable per pre-registration 3(b): a copy-pasteable declaration
+        # covering EVERY still-failing column (not just the 10 shown above),
+        # so declaring them is a paste, not a retype.
+        suggestion = "categorical_features:\n" + "\n".join(f"  - {col!r}" for col in names)
         return CheckResult("feature_columns_numeric", CheckStatus.FAIL,
                            f"{len(bad_cols)} feature column(s) contain values that cannot be "
                            f"read as numbers: {detail}. Zekan's models require every feature "
-                           f"column to be numeric -- encode categorical columns (e.g. ordinal "
-                           f"or one-hot encoding) before auditing this data.")
+                           f"column to be numeric -- if these are genuinely nominal columns "
+                           f"(not broken data), declare them under categorical_features so "
+                           f"Zekan can ordinal-encode them before auditing. Copy-paste into "
+                           f"your contract:\n{suggestion}")
     return CheckResult("feature_columns_numeric", CheckStatus.PASS,
-                       f"All {len(feature_cols)} feature column(s) are numeric")
+                       f"All {len(feature_cols)} feature column(s) are numeric "
+                       f"({len(declared_categorical & set(feature_cols))} declared categorical)")
 
 
 def _check_row_count_and_folds(c: PredictionContract, df: pd.DataFrame) -> CheckResult:
@@ -309,3 +327,130 @@ def candidate_features(contract: PredictionContract, df: pd.DataFrame) -> list[s
     }
     forbidden = set(contract.forbidden_after_prediction or [])
     return [c for c in df.columns if c not in excluded and c not in forbidden]
+
+
+# ── Categorical encoding (CATEGORICAL_SUPPORT_PREREGISTRATION.md 3(a)/3(d)) ────
+# Ordinal, sorted-unique -> 0..k-1, deterministic, target-free -- matching
+# zekan/benchmark/prepare_test_b.py's _build_ordinal_mappings semantics.
+# Unlike that script (which infers "every non-numeric, non-role column"),
+# this operates ONLY on contract.categorical_features: declared, never
+# inferred (3(a)) -- a nominal column and a column of numeral-looking
+# strings are different things, and only the user knows which is which.
+
+_CATEGORICAL_NAN_SENTINEL_BASE = "__NaN__"
+"""Same idea as near_bijection_probe.py's own _NAN_SENTINEL: NaN is treated
+as its own explicit category, not dropped or imputed -- "every value present
+gets a code" (pre-registration item 1) includes missingness itself. Plain
+`sorted(df[col].unique())` (prepare_test_b.py's literal implementation) would
+raise on a column that mixes real NaN with strings; Test B's own raw data
+never exercised that path (undeclared_feature_probe.py's docstring notes
+this as an unexercised gap), but Freddie Mac's frame tables can carry real
+NaN in a declared-categorical column, so this must not crash on it.
+
+This is a BASE value, not the literal sentinel every column uses -- see
+_pick_nan_sentinel: if a column's own real values happen to already contain
+this literal string, using it unmodified would collide two distinct raw
+values (actual NaN, and that real value) onto one code, breaking the
+bijection CATEGORICAL_SUPPORT_PREREGISTRATION.md section 4 relies on for
+Theil's U invariance. Collision is made impossible, not just unlikely."""
+
+
+def _pick_nan_sentinel(non_null_object_values: set) -> str:
+    """Return a NaN sentinel guaranteed not to collide with any of a
+    column's own real (non-null) values.
+
+    Starts from _CATEGORICAL_NAN_SENTINEL_BASE and appends underscores until
+    the result is absent from `non_null_object_values` -- deterministic
+    (same real values always produce the same sentinel) and exhaustive (a
+    finite column has finitely many values, so this always terminates).
+    Preserves the section 4 bijection claim: the sentinel this returns is
+    never equal to any value already in the column, so NaN and that value
+    can never collapse onto the same code.
+    """
+    sentinel = _CATEGORICAL_NAN_SENTINEL_BASE
+    while sentinel in non_null_object_values:
+        sentinel += "_"
+    return sentinel
+
+
+def build_categorical_mapping(
+    df: pd.DataFrame, categorical_features: list[str]
+) -> dict[str, dict]:
+    """Sorted-unique -> 0..k-1 ordinal mapping for each declared column.
+
+    Columns in `categorical_features` that are not present in `df` are
+    skipped (mirrors prepare_test_b.py's _apply_ordinal_mappings: a contract
+    may be reused across data files that don't all carry every declared
+    column). Uses ONLY each column's own values -- no target, no randomness
+    -- so the mapping is deterministic and reproducible: the same column
+    values always produce the same map. Sort key is `str` (not a bare value
+    sort) so a column need not be internally comparable/homogeneous to be
+    encoded -- this is the one deliberate generalization beyond
+    prepare_test_b.py's bare `sorted()`, made necessary by NaN-safety (see
+    _CATEGORICAL_NAN_SENTINEL_BASE above).
+
+    Returns {column: {"codes": {raw_value: code}, "nan_sentinel": str}} --
+    the sentinel actually used for THIS column (picked by _pick_nan_sentinel,
+    per-column since collision depends on that column's own values) travels
+    with the mapping so apply_categorical_mapping never has to re-derive or
+    guess it, including when applied later to a different dataframe under
+    the same contract.
+    """
+    mappings: dict[str, dict] = {}
+    for col in categorical_features:
+        if col not in df.columns:
+            continue
+        non_null = set(df[col].dropna().astype("object").unique())
+        sentinel = _pick_nan_sentinel(non_null)
+        x = df[col].astype("object").where(df[col].notna(), sentinel)
+        uniques = sorted(x.unique(), key=str)
+        codes = {v: i for i, v in enumerate(uniques)}
+        mappings[col] = {"codes": codes, "nan_sentinel": sentinel}
+    return mappings
+
+
+def apply_categorical_mapping(
+    df: pd.DataFrame,
+    mapping: dict[str, dict],
+    unseen_counts: Optional[dict[str, int]] = None,
+) -> pd.DataFrame:
+    """Apply a precomputed mapping (from build_categorical_mapping) to `df`.
+
+    Returns a copy -- the input `df` is never mutated. Columns in `mapping`
+    that are not present in `df` are skipped, same as build_categorical_mapping.
+    A value not present in that column's codes (e.g. a category seen only in
+    a later audit of different data under the same contract) maps to NaN via
+    pandas' ordinary `.map()` behavior -- not silently coerced to an existing
+    code.
+
+    unseen_counts
+        Optional out-parameter, same pattern as audit.py's `side_channel`
+        (a caller-supplied dict this function writes into, so the primary
+        return type -- a DataFrame -- never has to change shape to carry
+        secondary information; metrics.py's `df = apply_categorical_mapping(
+        df, categorical_map)` call keeps working unmodified). When given, is
+        populated with {column: n_unseen} for every column where one or more
+        values mapped to NaN because they were absent from that column's
+        codes -- "silence is not clearance": an unseen value quietly
+        becoming NaN must be countable by the caller, not just discoverable
+        later by noticing an unexplained NaN downstream. A column with zero
+        unseen values is not added. None (the default) skips counting --
+        every caller that doesn't pass this gets identical behavior to
+        before this parameter existed.
+    """
+    if not mapping:
+        return df
+    df = df.copy()
+    for col, col_map in mapping.items():
+        if col not in df.columns:
+            continue
+        codes = col_map["codes"]
+        sentinel = col_map["nan_sentinel"]
+        x = df[col].astype("object").where(df[col].notna(), sentinel)
+        mapped = x.map(codes)
+        if unseen_counts is not None:
+            n_unseen = int(mapped.isna().sum())
+            if n_unseen > 0:
+                unseen_counts[col] = n_unseen
+        df[col] = mapped
+    return df

@@ -8,7 +8,12 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from zekan.contract.contract_checks import CheckStatus, validate_contract
+from zekan.contract.contract_checks import (
+    CheckStatus,
+    apply_categorical_mapping,
+    build_categorical_mapping,
+    validate_contract,
+)
 from zekan.contract.prediction_contract import PredictionContract
 
 
@@ -196,3 +201,68 @@ def test_available_features_until_after_prediction_time_fails():
         f"Expected FAIL when available_until > snapshot_date, got {check.status}: {check.message}"
     )
     assert "available_features_until > prediction_time" in check.message
+
+
+# ── categorical encoding (CATEGORICAL_SUPPORT_PREREGISTRATION.md) ──────────────
+
+def test_categorical_mapping_nan_sentinel_collision_gets_distinct_codes():
+    """A declared categorical column containing BOTH real NaN and the literal
+    string "__NaN__" must not collide onto the same code: _pick_nan_sentinel
+    must extend the base sentinel until it no longer matches a real value in
+    the column, or the two distinct raw values (actual missingness, and a
+    real category that happens to spell the sentinel) would collapse onto
+    one code -- breaking the bijection section 4 relies on for Theil's U
+    invariance."""
+    df = pd.DataFrame({"nominal": ["a", "__NaN__", None, "b", "__NaN__"]})
+    mapping = build_categorical_mapping(df, ["nominal"])
+
+    col_map = mapping["nominal"]
+    codes, sentinel = col_map["codes"], col_map["nan_sentinel"]
+
+    assert sentinel != "__NaN__", "base sentinel collided with a real value and must have been extended"
+    assert "__NaN__" in codes, "the literal string is still a real category and must keep its own code"
+    assert sentinel in codes, "the (extended) sentinel must stand for actual NaN"
+    assert codes["__NaN__"] != codes[sentinel], "real value and actual NaN must never share a code"
+
+
+def test_apply_categorical_mapping_records_unseen_values():
+    """A value absent from a column's codes (e.g. a category seen only in a
+    later audit of different data under the same contract) must be counted
+    in unseen_counts, not silently folded onto an existing code -- "silence
+    is not clearance"."""
+    build_df = pd.DataFrame({"nominal": ["a", "b", "a"]})
+    mapping = build_categorical_mapping(build_df, ["nominal"])
+
+    apply_df = pd.DataFrame({"nominal": ["a", "b", "c", "c"]})  # "c" never seen at build time
+    unseen_counts: dict[str, int] = {}
+    result = apply_categorical_mapping(apply_df, mapping, unseen_counts=unseen_counts)
+
+    assert unseen_counts == {"nominal": 2}
+    codes = mapping["nominal"]["codes"]
+    assert result["nominal"].iloc[0] == codes["a"]
+    assert result["nominal"].iloc[1] == codes["b"]
+    assert pd.isna(result["nominal"].iloc[2]), "unseen value must map to NaN, not collide onto an existing code"
+    assert pd.isna(result["nominal"].iloc[3])
+
+
+def test_apply_categorical_mapping_no_unseen_values_leaves_dict_untouched():
+    """A column with zero unseen values must not appear in unseen_counts at
+    all -- distinguishes "checked, found nothing" from "never checked"."""
+    df = pd.DataFrame({"nominal": ["a", "b", "a"]})
+    mapping = build_categorical_mapping(df, ["nominal"])
+
+    unseen_counts: dict[str, int] = {}
+    apply_categorical_mapping(df, mapping, unseen_counts=unseen_counts)
+
+    assert unseen_counts == {}
+
+
+def test_build_categorical_mapping_is_deterministic():
+    """The same data run through build_categorical_mapping twice must
+    produce byte-identical mappings -- no target, no randomness, sorted-
+    unique only."""
+    df = pd.DataFrame({"nominal": ["z", "a", None, "m", "a", "__NaN__"]})
+    m1 = build_categorical_mapping(df, ["nominal"])
+    m2 = build_categorical_mapping(df, ["nominal"])
+
+    assert m1 == m2

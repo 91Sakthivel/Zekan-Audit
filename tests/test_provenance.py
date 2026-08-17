@@ -179,9 +179,11 @@ def test_read_estimator_random_state_returns_none_on_exception():
 def test_build_provenance_keys(simple_provenance):
     # re-baselined: Upgrade 1 step 1e adds undeclared_screen (additive,
     # top-level -- not nested under "seed", unlike null_scheme/null_stopping).
+    # CATEGORICAL_SUPPORT_PREREGISTRATION.md 3(e) adds categorical_encoding
+    # (additive, top-level, None when no categorical column was encoded).
     assert set(simple_provenance) == {
         "data_sha256", "contract_sha256", "estimator_identity", "seed", "versions",
-        "undeclared_screen",
+        "undeclared_screen", "categorical_encoding",
     }
 
 
@@ -301,9 +303,11 @@ def test_audit_json_provenance_has_expected_keys(audit_assets):
     )
     assert result.exit_code == 0, result.output
     prov = json.loads(result.stdout)["provenance"]
+    # CATEGORICAL_SUPPORT_PREREGISTRATION.md 3(e): additive top-level key,
+    # None here since this run's contract declares no categorical_features.
     assert set(prov) == {
         "data_sha256", "contract_sha256", "estimator_identity", "seed", "versions",
-        "undeclared_screen",
+        "undeclared_screen", "categorical_encoding",
     }
 
 

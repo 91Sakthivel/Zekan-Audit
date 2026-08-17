@@ -51,7 +51,11 @@ def _default_model_factory() -> Any:
     return _build_factory(DEFAULT_ESTIMATOR_NAME)()
 
 
-def _feature_matrix(df: pd.DataFrame, feature_cols: list[str]) -> np.ndarray:
+def _feature_matrix(
+    df: pd.DataFrame,
+    feature_cols: list[str],
+    categorical_map: Optional[dict[str, dict]] = None,
+) -> np.ndarray:
     """Cast feature columns to a single float32 array, once.
 
     float32 because sklearn's tree-based estimators internally convert X to
@@ -69,7 +73,22 @@ def _feature_matrix(df: pd.DataFrame, feature_cols: list[str]) -> np.ndarray:
     directly, bypassing that gate -- it converts a raw pandas cast error into
     a clear, typed message instead of letting an internal exception type leak
     to the user.
+
+    categorical_map
+        Optional {column: {raw_value: code}} mapping, built once by
+        contract_checks.build_categorical_mapping and passed in here rather
+        than derived from `df` on every call -- this function only APPLIES a
+        given map (contract_checks.apply_categorical_mapping), it never
+        builds one, so calling it repeatedly (e.g. once from engine.py's
+        X_all_full and again from null_baseline.py's X_base within the same
+        audit) never redoes the sorted-unique derivation. Default None
+        preserves every existing caller's behavior exactly -- CALLERS DO NOT
+        YET PASS THIS (CATEGORICAL_SUPPORT_PREREGISTRATION.md step 2 of 3;
+        engine.py's own call is wired to build and pass a real map in step 3).
     """
+    if categorical_map:
+        from zekan.contract.contract_checks import apply_categorical_mapping
+        df = apply_categorical_mapping(df, categorical_map)
     try:
         return df[feature_cols].to_numpy(dtype=np.float32)
     except (ValueError, TypeError) as e:
@@ -93,6 +112,7 @@ def evaluate_folds(
     return_predictions: bool = False,
     X_all: Optional[np.ndarray] = None,
     y_all: Optional[np.ndarray] = None,
+    categorical_map: Optional[dict[str, dict]] = None,
 ) -> EvaluationResult:
     """Evaluate a model across pre-built folds and return per-fold + mean AUC.
 
@@ -117,12 +137,16 @@ def evaluate_folds(
         avoid re-deriving it on every call. When None (the default, used by
         every pre-existing caller), built here exactly as before, once per
         call instead of once per fold.
+    categorical_map
+        Passed straight through to _feature_matrix when X_all is None (see
+        that function's docstring). Ignored when X_all is given -- the
+        caller already decided what encoding, if any, went into it.
     """
     if model_factory is None:
         model_factory = _default_model_factory
 
     if X_all is None:
-        X_all = _feature_matrix(df, feature_cols)
+        X_all = _feature_matrix(df, feature_cols, categorical_map=categorical_map)
     if y_all is None:
         y_all = df[target_col].to_numpy()
 
