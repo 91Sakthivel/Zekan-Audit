@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 import yaml
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from zekan.contract.prediction_contract import PredictionContract
 
@@ -20,6 +20,8 @@ class ModelSpec(BaseModel):
     Exactly one of 'type' (sklearn class path) or 'factory' (file.py:func_name)
     must be set. Params are passed through as-is; nothing is imported here.
     """
+
+    model_config = ConfigDict(extra="forbid")
 
     type: Optional[str] = None
     factory: Optional[str] = None
@@ -58,6 +60,8 @@ class SplitPolicy(BaseModel):
     in v1. The other enum values parse without error but raise at runtime.
     """
 
+    model_config = ConfigDict(extra="forbid")
+
     random_baseline: RandomBaselineStrategy = RandomBaselineStrategy.GROUPED_CV
     temporal_strategy: TemporalStrategy = TemporalStrategy.EXPANDING_WINDOW
     temporal_entity_overlap: TemporalEntityOverlap = (
@@ -94,6 +98,8 @@ class SplitPolicy(BaseModel):
 class SeverityConfig(BaseModel):
     """Controls the A/B/C performance decomposition and feature ablation."""
 
+    model_config = ConfigDict(extra="forbid")
+
     ablation_method: str = "retrain_without"
     top_k_ablation: int = 10
 
@@ -102,6 +108,8 @@ class SeverityConfig(BaseModel):
 
 class ZekanConfig(BaseModel):
     """Top-level configuration for a zekan audit run."""
+
+    model_config = ConfigDict(extra="forbid")
 
     contract: PredictionContract
     model: Optional[ModelSpec] = None

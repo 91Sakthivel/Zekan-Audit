@@ -6,11 +6,13 @@ from pathlib import Path
 from typing import Optional
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class CostModel(BaseModel):
     """Business cost parameters for ranking leakage fixes."""
+
+    model_config = ConfigDict(extra="forbid")
 
     decision: str
     discount_cost: tuple[float, float]
@@ -20,6 +22,8 @@ class CostModel(BaseModel):
 
 class SeverityThresholds(BaseModel):
     """AUC-inflation bands that gate trust levels."""
+
+    model_config = ConfigDict(extra="forbid")
 
     metric: str = "roc_auc"
     low_max: float = 0.02
@@ -34,12 +38,18 @@ class PredictionContract(BaseModel):
     The severity engine consults this to know what is and is not allowable.
     """
 
+    model_config = ConfigDict(extra="forbid")
+
     prediction_problem: str
     entity_id: str
     prediction_time: str
     target: str
     available_features_until: str
     forbidden_after_prediction: list[str] = Field(default_factory=list)
+    # Declared, never inferred (CATEGORICAL_SUPPORT_PREREGISTRATION.md 3(a)):
+    # a nominal column and a column of numeral-looking strings are different
+    # things, and only the user knows which is which.
+    categorical_features: list[str] = Field(default_factory=list)
     cost_model: Optional[CostModel] = None
     severity_thresholds: Optional[SeverityThresholds] = None
     schema_version: str = "1"
