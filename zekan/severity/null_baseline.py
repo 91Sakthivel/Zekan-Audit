@@ -92,7 +92,11 @@ from sklearn.metrics import roc_auc_score
 
 from zekan.config.schema import ZekanConfig
 from zekan.contract.prediction_contract import PredictionContract
-from zekan.severity.metrics import _feature_matrix, evaluate_folds
+from zekan.severity.metrics import (
+    _feature_matrix,
+    evaluate_folds,
+    remap_fold_active_positions,
+)
 from zekan.severity.splitters import temporal_expanding_folds
 
 
@@ -406,6 +410,7 @@ def _null_permutation_once(
     forbidden_col_positions: Optional[list[int]] = None,
     entity_codes: Optional[np.ndarray] = None,
     entity_n_groups: Optional[int] = None,
+    fold_active_positions: Optional[dict[int, np.ndarray]] = None,
 ) -> Optional[float]:
     """Compute one permutation draw: auc_b_perm - auc_c_pool, or None when no
     interior fold produced OOF predictions (mirrors the original `continue`
@@ -423,6 +428,13 @@ def _null_permutation_once(
     "across_entity"; auc_c_pool/y_pool are read-only constants shared (by
     value) across every call, computed once by the caller before dispatch.
 
+    fold_active_positions
+        Optional {fold_idx: array of active column positions} in
+        all_feature_cols' order (FOLD_INERT_FEATURES_PREREGISTRATION.md
+        sections 2-4/6), computed ONCE by the caller (engine.py, via
+        compute_fold_active_positions) and reused for every permutation
+        draw unchanged -- never recomputed here. None (the default, and the
+        bypass case) preserves the exact original behavior.
     X_base / y_all / forbidden_col_positions / entity_codes / entity_n_groups
         Optional fast path (F2a-perf): when X_base is given, the feature
         matrix for ALL rows is already built (once, by the caller, shared
@@ -454,6 +466,7 @@ def _null_permutation_once(
         eval_b_perm = evaluate_folds(
             df, all_feature_cols, target_col, temp_folds, model_factory,
             return_predictions=True, X_all=X_perm, y_all=y_all,
+            fold_active_positions=fold_active_positions,
         )
     else:
         if method == "within_entity":
@@ -465,7 +478,7 @@ def _null_permutation_once(
 
         eval_b_perm = evaluate_folds(
             df_perm, all_feature_cols, target_col, temp_folds, model_factory,
-            return_predictions=True,
+            return_predictions=True, fold_active_positions=fold_active_positions,
         )
     b_fe_by_idx = {fe.meta.fold_idx: fe for fe in eval_b_perm.fold_evals}
     proba_b_parts = [
@@ -554,6 +567,7 @@ def estimate_fixable_leakage_null(
     n_jobs: int = 1,
     stopping: str = "fixed_v1",
     categorical_map: Optional[dict[str, dict]] = None,
+    fold_active_positions: Optional[dict[int, np.ndarray]] = None,
 ) -> NullResult:
     """Estimate the permutation null distribution for fixable_leakage.
 
@@ -567,6 +581,16 @@ def estimate_fixable_leakage_null(
         function does internally (X_base, and every evaluate_folds call that
         doesn't reuse a pre-built matrix) uses the identical encoding.
         Default None preserves every existing caller's behavior exactly.
+    fold_active_positions
+        Optional {fold_idx: array of active column positions} in
+        all_feature_cols' order (FOLD_INERT_FEATURES_PREREGISTRATION.md
+        sections 2-4/6), the SAME object engine.py computed once (via
+        compute_fold_active_positions) for the whole audit and passed to
+        evaluate_folds for B and C -- passed through here so every
+        permutation draw's refit reuses it, and this function's own
+        precomputed C (below) is remapped to safe_feature_cols' own position
+        space from it, rather than either being recomputed. Default None
+        preserves every existing caller's behavior exactly.
     observed_fixable_leakage
         The fixable_leakage value from the unmodified engine run.
         Used only to compute the p-value; does not affect null sampling.
@@ -681,6 +705,16 @@ def estimate_fixable_leakage_null(
     ]
     safe_feature_cols = [f for f in all_feature_cols if f not in set(forbidden_cols)]
 
+    # Remap engine.py's fold_active_positions (all_feature_cols-space) onto
+    # safe_feature_cols' own position space, once, for the precomputed C
+    # below -- mirrors engine.py's own fold_active_positions_safe. The raw
+    # (all_feature_cols-space) dict is used as-is everywhere B is refit
+    # (X_base and every _null_permutation_once draw), since those always use
+    # all_feature_cols' own order.
+    _col_pos = {c: i for i, c in enumerate(all_feature_cols)}
+    _safe_positions = [_col_pos[c] for c in safe_feature_cols]
+    fold_active_positions_safe = remap_fold_active_positions(fold_active_positions, _safe_positions)
+
     # If no forbidden features, null is degenerate (B=C always → fixable_leakage=0)
     if not forbidden_cols:
         _degen_n = 0 if stopping == "sequential_v1" else n_permutations
@@ -757,6 +791,7 @@ def estimate_fixable_leakage_null(
         eval_c = evaluate_folds(
             df, safe_feature_cols, contract.target, temp_folds, model_factory,
             return_predictions=True, categorical_map=categorical_map,
+            fold_active_positions=fold_active_positions_safe,
         )
         y_pool, proba_c_pool = _pool_oof_predictions(eval_c.fold_evals, interior_fold_idxs)
         if y_pool is None:
@@ -801,6 +836,7 @@ def estimate_fixable_leakage_null(
                         X_base=X_base, y_all=y_all,
                         forbidden_col_positions=forbidden_col_positions,
                         entity_codes=entity_codes, entity_n_groups=entity_n_groups,
+                        fold_active_positions=fold_active_positions,
                     )
                     for c in child_batch
                 ]
@@ -813,6 +849,7 @@ def estimate_fixable_leakage_null(
                     X_base=X_base, y_all=y_all,
                     forbidden_col_positions=forbidden_col_positions,
                     entity_codes=entity_codes, entity_n_groups=entity_n_groups,
+                    fold_active_positions=fold_active_positions,
                 )
                 for c in child_batch
             )

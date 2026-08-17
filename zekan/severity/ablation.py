@@ -25,7 +25,7 @@ import numpy as np
 import pandas as pd
 
 from zekan.contract.prediction_contract import PredictionContract
-from zekan.severity.metrics import evaluate_folds
+from zekan.severity.metrics import evaluate_folds, remap_fold_active_positions
 from zekan.severity.splitters import FoldIndices
 
 
@@ -92,16 +92,21 @@ def _univariate_auc(
     model_factory: Callable[[], Any],
     X_sub: Optional[np.ndarray] = None,
     y_all: Optional[np.ndarray] = None,
+    fold_active_positions: Optional[dict[int, np.ndarray]] = None,
 ) -> float:
     """Mean temporal AUC when model is trained on a single feature only.
 
     X_sub / y_all: pre-sliced feature/target arrays for just this one column,
     row-aligned to `df` (see run_ablation's X_all threading). When None (every
     pre-existing caller), evaluate_folds rebuilds them from df, unchanged.
+    fold_active_positions: pre-remapped to this single-column order by the
+    caller (run_ablation's _fold_active); passed straight through, never
+    recomputed here. See run_ablation's docstring.
     """
     try:
         result = evaluate_folds(df, [feature], target_col, folds, model_factory,
-                                 X_all=X_sub, y_all=y_all)
+                                 X_all=X_sub, y_all=y_all,
+                                 fold_active_positions=fold_active_positions)
         return result.mean_auc if result.n_valid_folds > 0 else 0.5
     except Exception:
         return 0.5
@@ -121,19 +126,24 @@ def _ablate_one(
     baseline_auc: float,
     X_sub: Optional[np.ndarray] = None,
     y_all: Optional[np.ndarray] = None,
+    fold_active_positions: Optional[dict[int, np.ndarray]] = None,
 ) -> tuple:
     """Compute ablation for one feature; safe to call in a joblib worker.
 
     X_sub / y_all: pre-sliced (by the caller, in the SAME column order as
     features_minus_one below) feature/target arrays. When None (every
     pre-existing caller), evaluate_folds rebuilds them from df, unchanged.
+    fold_active_positions: pre-remapped to features_minus_one's order by the
+    caller (run_ablation's _fold_active); passed straight through, never
+    recomputed here.
 
     Returns (feature, auc_without, leakage_estimate, ablated, not_ablated_reason).
     Module-level so loky can pickle it by (module, qualname).
     """
     features_minus_one = [f for f in all_features if f != feature]
     result = evaluate_folds(df, features_minus_one, target_col, folds, model_factory,
-                             X_all=X_sub, y_all=y_all)
+                             X_all=X_sub, y_all=y_all,
+                             fold_active_positions=fold_active_positions)
     if result.n_valid_folds == 0:
         return (feature, float("nan"), float("nan"), False,
                 "no valid folds after dropping feature")
@@ -150,6 +160,7 @@ def _marginal_one(
     model_factory: Callable[[], Any],
     X_sub: Optional[np.ndarray] = None,
     y_all: Optional[np.ndarray] = None,
+    fold_active_positions: Optional[dict[int, np.ndarray]] = None,
 ) -> tuple[str, float]:
     """Measure feature's marginal leakage given all other ablated features are already removed.
 
@@ -164,13 +175,17 @@ def _marginal_one(
     fitted predictions change under a column reorder even with a fixed
     random_state, since its per-split feature subsampling is index-based).
     When None (every pre-existing caller), evaluate_folds rebuilds from df.
+    fold_active_positions: pre-remapped to feature_set_f's exact order by the
+    caller (run_ablation's _fold_active); passed straight through, never
+    recomputed here.
 
     Returns (feature, marginal_leakage).  NaN when no valid folds.
     Module-level so loky can pickle it by (module, qualname).
     """
     feature_set_f = drop_all_set + [feature]
     result = evaluate_folds(df, feature_set_f, target_col, folds, model_factory,
-                             X_all=X_sub, y_all=y_all)
+                             X_all=X_sub, y_all=y_all,
+                             fold_active_positions=fold_active_positions)
     if result.n_valid_folds == 0:
         return (feature, float("nan"))
     return (feature, result.mean_auc - cum_auc_without)
@@ -189,6 +204,7 @@ def run_ablation(
     all_features: Optional[list[str]] = None,
     X_all: Optional[np.ndarray] = None,
     y_all: Optional[np.ndarray] = None,
+    fold_active_positions: Optional[dict[int, np.ndarray]] = None,
 ) -> AblationSummary:
     """Run per-feature ablation on forbidden candidates.
 
@@ -211,6 +227,22 @@ def run_ablation(
         pre-existing direct caller, e.g. tests), all_features is recomputed
         exactly as before and every evaluate_folds call rebuilds its own
         matrix from df, unchanged.
+    fold_active_positions
+        Optional {fold_idx: array of active column positions} in
+        all_features' order (FOLD_INERT_FEATURES_PREREGISTRATION.md sections
+        2-4/6), the SAME object engine.py computed once (via
+        compute_fold_active_positions) for the whole audit and already
+        passed to evaluate_folds for B and C -- passed through here so
+        ablation's refits reuse it too, rather than recomputing or leaving
+        ablation to crash on a fold-inert column that B/C were already
+        protected against. Remapped locally (via _fold_active below) to each
+        call site's own column order -- every evaluate_folds call in this
+        module uses a different subset or reordering of all_features, so one
+        remap per call site is required; never a rescan of X_all. Default
+        None (every pre-existing caller) preserves the exact original
+        behavior and does not change what run_ablation measures -- only
+        which columns reach a given fold's fit when that fold has a
+        genuinely inert one.
     """
     if model_factory is None:
         model_factory = _default_factory
@@ -229,7 +261,11 @@ def run_ablation(
     if not candidates:
         return AblationSummary(baseline_auc=baseline_auc)
 
-    _col_pos = {f: i for i, f in enumerate(all_features)} if X_all is not None else {}
+    _col_pos = (
+        {f: i for i, f in enumerate(all_features)}
+        if (X_all is not None or fold_active_positions is not None)
+        else {}
+    )
 
     def _slice(cols: list[str]) -> Optional[np.ndarray]:
         """Pre-slice X_all by an explicit column-POSITION list (never a
@@ -240,11 +276,22 @@ def run_ablation(
             return None
         return X_all[:, [_col_pos[c] for c in cols]]
 
+    def _fold_active(cols: list[str]) -> Optional[dict[int, np.ndarray]]:
+        """Remap fold_active_positions (all_features' order) onto `cols`'
+        own order -- mirrors _slice's exact position-list construction, so
+        the same `cols` argument drives both. Returns None when
+        fold_active_positions wasn't provided, so evaluate_folds takes its
+        original, untouched path."""
+        if fold_active_positions is None:
+            return None
+        return remap_fold_active_positions(fold_active_positions, [_col_pos[c] for c in cols])
+
     # Rank: contract-forbidden (always 1.0) + univariate AUC scaled 0..1 + name pattern
     entries: list[AblationEntry] = []
     for feat in candidates:
         uni = _univariate_auc(df, feat, contract.target, folds, model_factory,
-                               X_sub=_slice([feat]), y_all=y_all)
+                               X_sub=_slice([feat]), y_all=y_all,
+                               fold_active_positions=_fold_active([feat]))
         name = _name_score(feat)
         rank = 1.0 + (uni - 0.5) * 2.0 + name * 0.5
         entries.append(AblationEntry(
@@ -272,6 +319,7 @@ def run_ablation(
             result = evaluate_folds(
                 df, features_minus_one, contract.target, folds, model_factory,
                 X_all=_slice(features_minus_one), y_all=y_all,
+                fold_active_positions=_fold_active(features_minus_one),
             )
             if result.n_valid_folds == 0:
                 entry.not_ablated_reason = "no valid folds after dropping feature"
@@ -287,6 +335,9 @@ def run_ablation(
                 model_factory, baseline_auc,
                 X_sub=_slice([f for f in all_features if f != entry.feature]),
                 y_all=y_all,
+                fold_active_positions=_fold_active(
+                    [f for f in all_features if f != entry.feature]
+                ),
             )
             for entry in to_ablate
         )
@@ -315,6 +366,7 @@ def run_ablation(
         cum_result = evaluate_folds(
             df, features_drop_all, contract.target, folds, model_factory,
             X_all=_slice(features_drop_all), y_all=y_all,
+            fold_active_positions=_fold_active(features_drop_all),
         )
         cum_leakage = baseline_auc - cum_result.mean_auc
         cumulative = CumulativeAblation(
@@ -360,7 +412,8 @@ def run_ablation(
             for entry in ablated:
                 feature_set_f = drop_all_set + [entry.feature]
                 r = evaluate_folds(df, feature_set_f, contract.target, folds, model_factory,
-                                    X_all=_slice(feature_set_f), y_all=y_all)
+                                    X_all=_slice(feature_set_f), y_all=y_all,
+                                    fold_active_positions=_fold_active(feature_set_f))
                 entry.apportioned_leakage = (
                     r.mean_auc - cum_auc if r.n_valid_folds > 0 else float("nan")
                 )
@@ -372,6 +425,7 @@ def run_ablation(
                     df, contract.target, folds, model_factory,
                     X_sub=_slice(drop_all_set + [entry.feature]),
                     y_all=y_all,
+                    fold_active_positions=_fold_active(drop_all_set + [entry.feature]),
                 )
                 for entry in ablated
             )

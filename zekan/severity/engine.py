@@ -30,7 +30,12 @@ from sklearn.metrics import roc_auc_score
 from zekan.config.schema import ZekanConfig
 from zekan.contract.contract_checks import build_categorical_mapping, validate_contract
 from zekan.contract.prediction_contract import PredictionContract
-from zekan.severity.metrics import _feature_matrix, evaluate_folds
+from zekan.severity.metrics import (
+    _feature_matrix,
+    compute_fold_active_positions,
+    evaluate_folds,
+    remap_fold_active_positions,
+)
 from zekan.severity.splitters import random_grouped_folds, temporal_expanding_folds
 
 
@@ -123,6 +128,13 @@ class SeverityResult:
     # when severity can't be computed.
     categorical_encoding: Optional[dict] = None
     categorical_unseen_counts: Optional[dict[str, int]] = None
+    # FOLD_INERT_FEATURES_PREREGISTRATION.md section 8 (reporting is built in
+    # step 3): which columns were fold-local inert, and in which folds.
+    # {fold_idx: [column names inert in that fold's train slice]} -- only
+    # folds with at least one inert column are included. None when nothing
+    # was ever inerted (compute_fold_active_positions returned None). Not
+    # rendered anywhere yet.
+    fold_inert_columns: Optional[dict[int, list[str]]] = None
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -314,6 +326,23 @@ def run_severity_analysis(
         min_neg=policy.min_negative_cases_per_fold,
     )
 
+    # ── Fold-local inert-column adapter ───────────────────────────────────────
+    # FOLD_INERT_FEATURES_PREREGISTRATION.md (0fc7487), amended by
+    # FOLD_INERT_ADDENDUM_01_ZK_EST_04_UNTESTABLE.md (4390f7a). Computed ONCE
+    # here, against the full all_features universe on X_all_full, and reused
+    # for B, C, and the permutation null below (section 6) -- never
+    # recomputed per fit or per permutation draw. Only applies to temp_folds
+    # (expanding-window, nested -- section 7's monotonicity invariant is
+    # meaningful here); NOT applied to rand_folds/eval_a above, which is
+    # grouped CV with no nesting guarantee and, empirically, never produced
+    # an all-NaN-in-train column for the dataset that surfaced this defect
+    # (FOLD_LEVEL_ALLNAN_PREREGISTRATION.md's crash traced to eval_b, not
+    # eval_a). Returns None (the common case, including Test B) when no fold
+    # has any inert column, in which case evaluate_folds' original code path
+    # runs completely untouched below.
+    fold_active_positions = compute_fold_active_positions(X_all_full, all_features, temp_folds)
+    fold_active_positions_safe = remap_fold_active_positions(fold_active_positions, safe_positions)
+
     # Build fold-index → FoldMeta for partial-fold detection.
     fold_meta_by_idx = {
         fold.meta.fold_idx: fold.meta
@@ -342,12 +371,14 @@ def run_severity_analysis(
     eval_b = evaluate_folds(
         df, all_features, contract.target, temp_folds, model_factory,
         return_predictions=True, X_all=X_all_full, y_all=y_all,
+        fold_active_positions=fold_active_positions,
     )
 
     # ── C: temporal CV, forbidden features dropped and retrained ──────────────
     eval_c = evaluate_folds(
         df, safe_features, contract.target, temp_folds, model_factory,
         return_predictions=True, X_all=X_safe, y_all=y_all,
+        fold_active_positions=fold_active_positions_safe,
     )
     estimated_deployable_auc = eval_c.mean_auc
 
@@ -419,6 +450,7 @@ def run_severity_analysis(
             df, contract, baseline_auc=naive_auc, folds=temp_folds,
             model_factory=model_factory, n_jobs=n_jobs,
             all_features=all_features, X_all=X_all_full, y_all=y_all,
+            fold_active_positions=fold_active_positions,
         )
 
     total_optimism = naive_auc - estimated_deployable_auc
@@ -460,6 +492,7 @@ def run_severity_analysis(
             n_jobs=n_jobs,
             stopping=null_stopping,
             categorical_map=categorical_map,
+            fold_active_positions=fold_active_positions,
         )
         null_95th = _null.null_95th
         null_99th = _null.null_99th
@@ -494,6 +527,7 @@ def run_severity_analysis(
             n_jobs=n_jobs,
             stopping=null_stopping,
             categorical_map=categorical_map,
+            fold_active_positions=fold_active_positions,
         )
         if _null_across.n_permutations > 0:
             null_95th_across = _null_across.null_95th
@@ -506,6 +540,15 @@ def run_severity_analysis(
             p_is_upper_bound_across = _null_across.p_is_upper_bound
             _null_unit_across = max(_null_across.null_iqr, _NSL_EPS)
             nsl_across = (fixable_leakage - _null_across.null_99th) / _null_unit_across
+
+    fold_inert_columns: Optional[dict[int, list[str]]] = None
+    if fold_active_positions is not None:
+        fold_inert_columns = {}
+        _all_positions = set(range(len(all_features)))
+        for _idx, _active in fold_active_positions.items():
+            _inert_positions = _all_positions - set(_active.tolist())
+            if _inert_positions:
+                fold_inert_columns[_idx] = [all_features[i] for i in sorted(_inert_positions)]
 
     return SeverityResult(
         status=_status_from_optimism(total_optimism),
@@ -544,6 +587,7 @@ def run_severity_analysis(
         y_all=y_all,
         categorical_encoding=categorical_map or None,
         categorical_unseen_counts=categorical_unseen_counts or None,
+        fold_inert_columns=fold_inert_columns,
     )
 
 
