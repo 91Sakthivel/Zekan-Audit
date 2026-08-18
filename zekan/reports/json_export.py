@@ -78,9 +78,10 @@ def verdict_to_dict(report: VerdictReport) -> dict:
       Pydantic schema), same reason as structural_annotations. None when the
       screen did not run or found nothing to report.
     - feature_attribution stays nested under measured_damage (not hoisted).
-    - categorical_encoding / categorical_unseen_counts are plain dicts (no
-      custom Pydantic schema needed) so they come straight out of `raw` --
-      unlike structural_annotations/undeclared_feature_panel, no manual
+    - categorical_encoding / categorical_unseen_counts / fold_inert_columns /
+      fold_feature_coverage are plain dicts (no custom Pydantic schema
+      needed) so they come straight out of `raw` -- unlike
+      structural_annotations/undeclared_feature_panel, no manual
       serialization step, just an explicit key in `out` so they're not
       silently dropped by this function's own allowlist below.
     - Every documented top-level key is always present; None when absent.
@@ -103,6 +104,8 @@ def verdict_to_dict(report: VerdictReport) -> dict:
         "categorical_unseen_counts": raw["categorical_unseen_counts"],
         "engine_detection": raw["engine_detection"],
         "fold_ci": raw["fold_ci"],
+        "fold_inert_columns": raw["fold_inert_columns"],
+        "fold_feature_coverage": raw["fold_feature_coverage"],
         "measured_damage": raw["measured_damage"],
         "policy_decision": raw["policy_decision"],
         "schema_version": "1",

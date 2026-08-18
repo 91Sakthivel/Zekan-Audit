@@ -231,6 +231,48 @@ def _run_structural_probes(
     return found
 
 
+def _summarize_fold_coverage(
+    severity_result,
+) -> tuple[Optional[dict[str, dict[str, int]]], Optional[dict[str, Optional[int]]]]:
+    """Invert SeverityResult.fold_inert_columns (fold_idx -> [inert names])
+    into the two VerdictReport-facing shapes.
+
+    FOLD_INERT_FEATURES_PREREGISTRATION.md section 8: per-fold active/inert
+    counts, and per column the fold from which it becomes active (section 7
+    monotonicity makes that a complete summary -- no per-fold list needed
+    per column). Pure transform of what step 2 already computed; no rescan
+    of X_all, no new fold construction.
+
+    Returns (fold_feature_coverage, fold_inert_columns), both None when
+    severity_result.fold_inert_columns is None (nothing was ever inerted).
+    """
+    if severity_result.fold_inert_columns is None:
+        return None, None
+
+    total_features = len(severity_result.all_features or [])
+    fold_feature_coverage = {
+        str(idx): {"active": total_features - len(names), "inert": len(names)}
+        for idx, names in severity_result.fold_inert_columns.items()
+    }
+
+    last_inert_fold: dict[str, int] = {}
+    for idx, names in severity_result.fold_inert_columns.items():
+        for name in names:
+            last_inert_fold[name] = max(idx, last_inert_fold.get(name, -1))
+
+    max_fold_idx = max(
+        (f.meta.fold_idx for f in (severity_result.folds or [])), default=None
+    )
+    fold_inert_columns: dict[str, Optional[int]] = {}
+    for name, last in last_inert_fold.items():
+        candidate = last + 1
+        fold_inert_columns[name] = (
+            candidate if (max_fold_idx is not None and candidate <= max_fold_idx) else None
+        )
+
+    return fold_feature_coverage, fold_inert_columns
+
+
 def run_audit(
     df: pd.DataFrame,
     contract: PredictionContract,
@@ -321,6 +363,11 @@ def run_audit(
         _updates["categorical_encoding"] = severity_result.categorical_encoding
     if severity_result.categorical_unseen_counts is not None:
         _updates["categorical_unseen_counts"] = severity_result.categorical_unseen_counts
+    _fold_coverage, _fold_inert = _summarize_fold_coverage(severity_result)
+    if _fold_coverage is not None:
+        _updates["fold_feature_coverage"] = _fold_coverage
+    if _fold_inert is not None:
+        _updates["fold_inert_columns"] = _fold_inert
     if _updates:
         report = report.model_copy(update=_updates)
 

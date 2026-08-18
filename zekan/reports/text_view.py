@@ -31,12 +31,15 @@ def render_verdict(report: VerdictReport, stream=None) -> str:
     )
 
     fold_ci = report.fold_ci
+    fold_inert_columns = report.fold_inert_columns
+    fold_feature_coverage = report.fold_feature_coverage
 
     if verdict in ("PASS", "NOTE"):
         text = _render_trusted(
             _marker("trusted", stream), annotations=annotations, fold_ci=fold_ci,
             detection_channel=detection_channel, near_certain=near_certain,
             near_bijection=near_bijection, panel=panel,
+            fold_inert_columns=fold_inert_columns, fold_feature_coverage=fold_feature_coverage,
         )
     elif verdict == "WARN":
         text = _render_actionable(
@@ -50,6 +53,8 @@ def render_verdict(report: VerdictReport, stream=None) -> str:
             near_certain=near_certain,
             near_bijection=near_bijection,
             panel=panel,
+            fold_inert_columns=fold_inert_columns,
+            fold_feature_coverage=fold_feature_coverage,
         )
     elif verdict == "FAIL":
         text = _render_actionable(
@@ -63,6 +68,8 @@ def render_verdict(report: VerdictReport, stream=None) -> str:
             near_certain=near_certain,
             near_bijection=near_bijection,
             panel=panel,
+            fold_inert_columns=fold_inert_columns,
+            fold_feature_coverage=fold_feature_coverage,
         )
     elif verdict == "UNCONFIRMED_HIGH_DAMAGE":
         text = _render_inconclusive(
@@ -74,11 +81,14 @@ def render_verdict(report: VerdictReport, stream=None) -> str:
             near_certain=near_certain,
             near_bijection=near_bijection,
             panel=panel,
+            fold_inert_columns=fold_inert_columns,
+            fold_feature_coverage=fold_feature_coverage,
         )
     else:
         text = _render_trusted(
             _marker("trusted", stream), annotations=annotations,
             near_certain=near_certain, near_bijection=near_bijection, panel=panel,
+            fold_inert_columns=fold_inert_columns, fold_feature_coverage=fold_feature_coverage,
         )
     return _sanitize(text, stream)
 
@@ -91,12 +101,14 @@ _DIVIDER = "─" * 60
 def _render_trusted(
     banner: str, annotations=None, fold_ci: Optional[FoldCI] = None,
     detection_channel: str = "", near_certain=None, near_bijection=None, panel=None,
+    fold_inert_columns=None, fold_feature_coverage=None,
 ) -> str:
     lines = [banner, _MSG.TRANSLATION_TRUSTED, ""]
     if detection_channel in ("across_entity", "both"):
         lines.append(_MSG.ACROSS_ENTITY_DETECTED)
         lines.append("")
     _append_block(lines, _prominent_lines(near_certain, near_bijection))
+    _append_block(lines, _fold_coverage_lines(fold_inert_columns, fold_feature_coverage))
     if fold_ci is not None and fold_ci.stability_seeds_checked > 0 and not fold_ci.seed_instability_note:
         lines.append(
             f"  Stability: verdict consistent across {fold_ci.stability_seeds_checked} null seeds."
@@ -128,12 +140,15 @@ def _render_actionable(
     near_certain=None,
     near_bijection=None,
     panel=None,
+    fold_inert_columns=None,
+    fold_feature_coverage=None,
 ) -> str:
     lines: list[str] = [marker, translation, ""]
     if detection_channel in ("across_entity", "both"):
         lines.append(_MSG.ACROSS_ENTITY_DETECTED)
         lines.append("")
     _append_block(lines, _prominent_lines(near_certain, near_bijection))
+    _append_block(lines, _fold_coverage_lines(fold_inert_columns, fold_feature_coverage))
 
     lines.append("THE DAMAGE")
     lines.append("  Your reported accuracy is inflated — real performance will be lower.")
@@ -209,6 +224,8 @@ def _render_inconclusive(
     near_certain=None,
     near_bijection=None,
     panel=None,
+    fold_inert_columns=None,
+    fold_feature_coverage=None,
 ) -> str:
     lines: list[str] = [banner, _MSG.TRANSLATION_INCONCLUSIVE, ""]
 
@@ -229,6 +246,7 @@ def _render_inconclusive(
         lines.append("")
 
     _append_block(lines, _prominent_lines(near_certain, near_bijection))
+    _append_block(lines, _fold_coverage_lines(fold_inert_columns, fold_feature_coverage))
 
     lines.extend([
         "THE DAMAGE",
@@ -396,6 +414,61 @@ def _panel_lines(panel) -> list[str]:
             f"  {_MSG.RANKED_PANEL_NOT_SCREENABLE.format(count=len(panel.not_screenable))}"
         )
     lines.append(f"  {_MSG.RANKED_PANEL_ACTION}")
+    return lines
+
+
+def _fold_coverage_lines(
+    fold_inert_columns: Optional[dict] = None,
+    fold_feature_coverage: Optional[dict] = None,
+) -> list[str]:
+    """FEATURE COVERAGE block -- FOLD_INERT_FEATURES_PREREGISTRATION.md
+    section 8, amended by FOLD_INERT_ADDENDUM_01_ZK_EST_04_UNTESTABLE.md
+    section 6: this is the only mechanism by which a user learns fold-local
+    inerting occurred. Empty (no block) when fold_inert_columns is empty/None
+    -- the common case, including Test B. Reports "active from fold N"
+    per column (section 7 monotonicity makes that a complete summary, not a
+    per-fold list) and states coverage is PARTIAL for those columns --
+    never full. Deliberately says nothing about structural probes (Upgrade
+    H/1, section 9): severity coverage and structural coverage are kept
+    separate here, same as everywhere else in this renderer.
+
+    No leading/trailing blank padding -- see _prominent_lines' docstring;
+    same _append_block convention.
+    """
+    if not fold_inert_columns:
+        return []
+    lines = ["FEATURE COVERAGE"]
+
+    # Keys are strings (JSON-friendly) -- sort numerically, not lexicographically,
+    # so this stays correct once fold indices reach two digits (e.g. "10" vs "2").
+    worst_fold = min(fold_feature_coverage, key=int) if fold_feature_coverage else None
+    worst = fold_feature_coverage.get(worst_fold) if worst_fold is not None else None
+    n_inert = len(fold_inert_columns)
+    if worst is not None:
+        lines.append(
+            f"  {n_inert} of {worst['active'] + worst['inert']} declared feature(s) had "
+            f"no training data in fold {worst_fold} ({worst['active']} active)."
+        )
+    else:
+        lines.append(f"  {n_inert} declared feature(s) had no training data in an early fold.")
+
+    items = sorted(
+        fold_inert_columns.items(),
+        key=lambda kv: (kv[1] is None, kv[1] if kv[1] is not None else -1, kv[0]),
+    )
+    shown, rest = items[:5], items[5:]
+    for name, first_active in shown:
+        if first_active is None:
+            lines.append(f"    {name!r} — never accumulated training data in this audit")
+        else:
+            lines.append(f"    {name!r} — active from fold {first_active}")
+    if rest:
+        lines.append(f"    ...and {len(rest)} more")
+
+    lines.append(
+        "  Severity for these feature(s) is PARTIAL — measured only from the fold "
+        "each became active, not the full fold set other features were measured on."
+    )
     return lines
 
 

@@ -16,9 +16,10 @@ from zekan.benchmark.injectors import (
     inject_label_proxy,
     inject_presplit_artifact,
 )
-from zekan.severity.metrics import evaluate_folds
+from zekan.severity.metrics import compute_fold_active_positions, evaluate_folds
 from zekan.severity.splitters import (
     FoldIndices,
+    FoldMeta,
     random_grouped_folds,
     temporal_expanding_folds,
 )
@@ -293,6 +294,41 @@ def test_evaluate_folds_non_numeric_feature_raises_clean_error(
     df["race"] = "Caucasian"
     with pytest.raises(ValueError, match="Could not cast feature columns to numeric"):
         evaluate_folds(df, ["feature_0", "race"], "target", rand_folds)
+
+
+def _fake_fold_meta(fold_idx: int) -> FoldMeta:
+    return FoldMeta(
+        fold_idx=fold_idx, strategy="temporal_expanding",
+        train_rows=2, test_rows=0,
+        train_base_rate=0.0, test_base_rate=0.0,
+        entity_overlap_count=0, entity_overlap_pct=0.0,
+    )
+
+
+def test_compute_fold_active_positions_raises_on_non_nested_folds() -> None:
+    """FOLD_INERT_FEATURES_PREREGISTRATION.md section 7: expanding-window
+    train sets are nested, so a column active in an earlier fold's train
+    slice must never be inert in a later one. Two folds whose train slices
+    are NOT nested -- fold 1's rows are disjoint from fold 0's, not a
+    superset -- must raise, naming it as a monotonicity violation."""
+    X_all = np.array([
+        [1.0, 10.0],
+        [2.0, 20.0],
+        [np.nan, 30.0],
+        [np.nan, 40.0],
+    ], dtype=np.float32)
+
+    fold0 = FoldIndices(
+        train_idx=np.array([0, 1]), test_idx=np.array([], dtype=int),
+        meta=_fake_fold_meta(0),
+    )
+    fold1 = FoldIndices(
+        train_idx=np.array([2, 3]), test_idx=np.array([], dtype=int),
+        meta=_fake_fold_meta(1),
+    )
+
+    with pytest.raises(ValueError, match="monotonicity"):
+        compute_fold_active_positions(X_all, ["col_a", "col_b"], [fold0, fold1])
 
 
 def test_original_df_not_mutated(small_df: pd.DataFrame) -> None:

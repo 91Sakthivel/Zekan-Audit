@@ -643,3 +643,35 @@ def test_across_entity_line_absent_when_pass():
     assert report.engine_detection.detection_channel == ""
     out = render_verdict(report, stream=_Utf8Stream())
     assert "across-entity" not in out.lower()
+
+
+# ── FOLD_INERT_FEATURES_PREREGISTRATION.md section 8: FEATURE COVERAGE block ──
+
+def _fold_inert_report():
+    sr = _severity_result(fixable_leakage=0.03, p_value=0.50, nsl=-0.5)
+    report = build_verdict(sr)
+    return report.model_copy(update={
+        "fold_inert_columns": {"lagged_balance": 2, "sparse_flag": 1},
+        "fold_feature_coverage": {
+            "0": {"active": 8, "inert": 2},
+            "1": {"active": 9, "inert": 1},
+        },
+    })
+
+
+def test_fold_inert_shows_feature_coverage_and_partial():
+    out = render_verdict(_fold_inert_report(), stream=_Utf8Stream())
+    assert "FEATURE COVERAGE" in out
+    assert "PARTIAL" in out
+
+
+def test_no_fold_inert_shows_no_feature_coverage_block():
+    sr = _severity_result(fixable_leakage=0.03, p_value=0.50, nsl=-0.5)
+    report = build_verdict(sr)
+    out = render_verdict(report, stream=_Utf8Stream())
+    assert "FEATURE COVERAGE" not in out
+
+
+def test_fold_inert_shows_active_from_fold_line():
+    out = render_verdict(_fold_inert_report(), stream=_Utf8Stream())
+    assert "'lagged_balance' — active from fold 2" in out

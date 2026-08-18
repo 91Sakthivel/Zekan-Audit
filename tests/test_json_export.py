@@ -232,6 +232,8 @@ _TOP_LEVEL_KEYS = {
     "categorical_unseen_counts",  # ditto; None when no declared column had an unseen value
     "engine_detection",
     "fold_ci",
+    "fold_inert_columns",     # FOLD_INERT_FEATURES_PREREGISTRATION.md section 8; None when nothing was ever inerted
+    "fold_feature_coverage",  # ditto, companion per-fold active/inert counts; None when nothing was ever inerted
     "gate",           # added by CLI, not by verdict_to_dict — tested separately
     "measured_damage",
     "policy_decision",

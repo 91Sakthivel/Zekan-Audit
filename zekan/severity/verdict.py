@@ -352,6 +352,44 @@ class VerdictReport(BaseModel):
     not a reproducibility artifact.
     """
 
+    fold_inert_columns: Optional[dict[str, Optional[int]]] = None
+    """FOLD_INERT_FEATURES_PREREGISTRATION.md section 8 (reporting), amended
+    by FOLD_INERT_ADDENDUM_01_ZK_EST_04_UNTESTABLE.md section 6 -- this is now
+    the ONLY mechanism by which a user learns fold-local inerting occurred,
+    since the probability-identity invariant (ZK-EST-04) turned out
+    untestable. {column: first_fold_idx_where_active} -- section 7's
+    monotonicity makes "active from fold N onward" a complete per-column
+    summary, so no per-fold list is carried here. A column mapped to None
+    never accumulated training data in any fold of this audit. Promoted from
+    SeverityResult.fold_inert_columns by run_audit() (inverted from
+    fold_idx->names into name->first_active_fold there). None when nothing
+    was ever inerted (the common case, including Test B).
+
+    The exact PERIOD at which a column first gains training data is NOT
+    carried here: step 2's fold-local computation only knows fold-level
+    availability (one np.isnan(...).all(axis=0) pass per fold), never which
+    row within a fold's newly-added period block is the column's first
+    non-null value -- getting that would require a fresh per-row scan, which
+    section 6 explicitly rules out as recomputation. Fold granularity is
+    what was actually (cheaply) measured, so that's what's reported.
+
+    Severity coverage for a listed column is PARTIAL, not full: measured
+    only from the fold it became active, not the complete fold set an
+    always-active column was measured on. Kept strictly separate in text_view
+    from structural_annotations/undeclared_feature_panel (section 9) -- this
+    is about how much of measured_damage/fixable_leakage is trustworthy per
+    column, never about whether Upgrade H/1 flagged something.
+    """
+
+    fold_feature_coverage: Optional[dict[str, dict[str, int]]] = None
+    """{fold_idx (as str): {"active": N, "inert": M}} declared-feature
+    counts, companion to fold_inert_columns above. Only folds with >= 1
+    inert column are included -- section 7 monotonicity means a fold absent
+    here had full (all-active) coverage, so nothing is lost by omitting it.
+    Promoted from SeverityResult.fold_inert_columns/all_features by
+    run_audit(). None when nothing was ever inerted.
+    """
+
     def __str__(self) -> str:
         from zekan.reports.text_view import render_verdict
         return render_verdict(self)
@@ -490,12 +528,15 @@ def _make_unconfirmed_report(
     undeclared_feature_panel: Any = None,
     categorical_encoding: Optional[dict] = None,
     categorical_unseen_counts: Optional[dict[str, int]] = None,
+    fold_inert_columns: Optional[dict[str, Optional[int]]] = None,
+    fold_feature_coverage: Optional[dict[str, dict[str, int]]] = None,
 ) -> VerdictReport:
     """Canonical UNCONFIRMED_HIGH_DAMAGE report factory.
 
     Both the fold-starved gate (spec 4) and the seed-stability downgrade (spec 3)
     route through this function so they produce the same VerdictReport shape.
-    categorical_encoding/categorical_unseen_counts default None here (same as
+    categorical_encoding/categorical_unseen_counts/fold_inert_columns/
+    fold_feature_coverage default None here (same as
     structural_annotations/undeclared_feature_panel): the fold-starved gate
     call (inside build_verdict) doesn't know them yet -- run_audit()'s own
     model_copy(update=_updates) step sets them afterward regardless. The
@@ -512,6 +553,8 @@ def _make_unconfirmed_report(
         undeclared_feature_panel=undeclared_feature_panel,
         categorical_encoding=categorical_encoding,
         categorical_unseen_counts=categorical_unseen_counts,
+        fold_inert_columns=fold_inert_columns,
+        fold_feature_coverage=fold_feature_coverage,
     )
 
 
@@ -892,4 +935,6 @@ def _apply_seed_stability(
         undeclared_feature_panel=primary_report.undeclared_feature_panel,
         categorical_encoding=primary_report.categorical_encoding,
         categorical_unseen_counts=primary_report.categorical_unseen_counts,
+        fold_inert_columns=primary_report.fold_inert_columns,
+        fold_feature_coverage=primary_report.fold_feature_coverage,
     )
