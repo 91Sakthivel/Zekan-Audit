@@ -36,7 +36,11 @@ from zekan.severity.metrics import (
     evaluate_folds,
     remap_fold_active_positions,
 )
-from zekan.severity.splitters import random_grouped_folds, temporal_expanding_folds
+from zekan.severity.splitters import (
+    build_period_rank,
+    random_grouped_folds,
+    temporal_expanding_folds,
+)
 
 
 # ── Result structures ─────────────────────────────────────────────────────────
@@ -356,14 +360,7 @@ def run_severity_analysis(
     # period only).  For leak_lookahead=k it additionally excludes folds whose test
     # window is within k periods of the end, where future rows cannot carry a full
     # k-step signal.
-    sorted_all_periods = sorted(
-        df[contract.prediction_time].unique(),
-        key=lambda x: pd.to_datetime(x),
-    )
-    period_rank: dict[str, int] = {
-        pd.Timestamp(p).strftime("%Y-%m-%d"): i
-        for i, p in enumerate(sorted_all_periods)
-    }
+    period_rank: dict[str, int] = build_period_rank(df, contract.prediction_time)
     n_time_periods = len(period_rank)
     interior_rank_cutoff = n_time_periods - 1 - policy.leak_lookahead
 
@@ -391,8 +388,9 @@ def run_severity_analysis(
         if idx not in c_by_idx:
             continue
         meta = fold_meta_by_idx.get(idx)
-        ttm = meta.test_time_max if meta else None
-        ttm_rank = period_rank.get(ttm) if ttm is not None else None
+        ttm = meta.test_time_max if meta else None  # display value only, unchanged
+        ttm_rank_key = meta.test_time_max_raw if meta else None
+        ttm_rank = period_rank.get(ttm_rank_key) if ttm_rank_key is not None else None
         is_terminal = (
             ttm_rank is not None and ttm_rank > interior_rank_cutoff
         )

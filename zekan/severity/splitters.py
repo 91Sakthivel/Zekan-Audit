@@ -36,6 +36,13 @@ class FoldMeta:
     train_time_max: Optional[str] = None
     test_time_min: Optional[str] = None
     test_time_max: Optional[str] = None
+    # Raw (unformatted) column value for the fold's chronological test-period
+    # end, used ONLY as a period_rank lookup key -- see build_period_rank.
+    # test_time_max above remains the display string; this is a separate
+    # field so fixing the rank lookup does not change what gets displayed
+    # (PERIOD_RANK_ADDENDUM_01_ORDINAL_RANK.md section 6 leaves the display
+    # value's own defect open, undecided).
+    test_time_max_raw: Optional[object] = None
     skipped: bool = False
     skip_reason: Optional[str] = None
 
@@ -72,6 +79,31 @@ def _skip_reason(
     if n_neg < min_neg:
         reasons.append(f"test_negatives={n_neg} < {min_neg}")
     return "; ".join(reasons) if reasons else None
+
+
+def _sorted_periods_with_raw(
+    times: pd.Series, raw: pd.Series
+) -> tuple[list, list]:
+    """Return (sorted_parsed_periods, sorted_raw_periods), index-aligned.
+
+    pd.to_datetime is used ONLY to establish chronological order. For a
+    column whose values are not real dates (e.g. an integer YYYYMM period
+    counter), the parsed timestamp itself can be wrong, but its order
+    relative to the other parsed values is preserved -- measured against
+    real data in PERIOD_RANK_ADDENDUM_01_ORDINAL_RANK.md section 2. Callers
+    that need a value to key a lookup on (period_rank, FoldMeta) must use
+    the RAW element from this pair, never a formatted string built from the
+    (possibly wrong) parsed timestamp.
+
+    Deduplication keeps the first-occurring raw value per distinct parsed
+    value, so this is correct even in the pathological case where two
+    different raw values parse to the identical timestamp.
+    """
+    first_mask = ~times.duplicated(keep="first")
+    pairs = sorted(zip(times[first_mask], raw[first_mask]), key=lambda pair: pair[0])
+    sorted_parsed = [p for p, _ in pairs]
+    sorted_raw = [r for _, r in pairs]
+    return sorted_parsed, sorted_raw
 
 
 # ── Splitters ─────────────────────────────────────────────────────────────────
@@ -161,7 +193,7 @@ def temporal_expanding_folds(
             f"ordered, parseable date/time column -- provide a real date/time column, or "
             f"derive one (e.g. an ordinal period column) from your data."
         ) from e
-    sorted_periods: list = sorted(times.unique())
+    sorted_periods, sorted_raw_periods = _sorted_periods_with_raw(times, df[time_col])
     n_periods = len(sorted_periods)
 
     if n_periods < 2:
@@ -219,6 +251,11 @@ def temporal_expanding_folds(
             train_time_max=_fmt(max(train_periods)),
             test_time_min=_fmt(min(test_periods)),
             test_time_max=_fmt(max(test_periods)),
+            # sorted_periods[test_end - 1] == max(test_periods) by construction
+            # (sorted_periods is ascending, test_periods = sorted_periods[test_start:test_end]);
+            # sorted_raw_periods is index-aligned with it, so this is that same
+            # period's raw column value.
+            test_time_max_raw=sorted_raw_periods[test_end - 1],
         )
 
         reason = _skip_reason(test_idx, df, target_col, min_test_rows, min_pos, min_neg)
@@ -230,3 +267,21 @@ def temporal_expanding_folds(
         fold_idx += 1
 
     return folds
+
+
+def build_period_rank(df: pd.DataFrame, time_col: str) -> dict:
+    """Map each distinct period's RAW column value to its chronological rank.
+
+    pd.to_datetime is used ONLY as the sort key here -- for a column whose
+    values are not real dates (e.g. an integer YYYYMM period counter), the
+    parsed timestamp itself may be wrong, but its ORDER relative to the other
+    parsed values is still correct (measured against real Freddie Mac data;
+    see PERIOD_RANK_ADDENDUM_01_ORDINAL_RANK.md section 2). The rank dict is
+    keyed on the RAW column value, never a formatted date string built from
+    the (possibly wrong) parsed timestamp, so a wrong parse can never
+    collapse distinct periods onto the same key. Callers must look this up
+    with FoldMeta.test_time_max_raw, not the display string test_time_max.
+    """
+    times = pd.to_datetime(df[time_col])
+    _, sorted_raw_periods = _sorted_periods_with_raw(times, df[time_col])
+    return {raw_val: i for i, raw_val in enumerate(sorted_raw_periods)}

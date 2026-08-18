@@ -20,6 +20,7 @@ from zekan.severity.metrics import compute_fold_active_positions, evaluate_folds
 from zekan.severity.splitters import (
     FoldIndices,
     FoldMeta,
+    build_period_rank,
     random_grouped_folds,
     temporal_expanding_folds,
 )
@@ -280,6 +281,31 @@ def test_temporal_expanding_folds_unparseable_time_col_raises_clean_error() -> N
         temporal_expanding_folds(
             df, time_col="prediction_time", entity_col="entity_id", target_col="target",
         )
+
+
+def test_build_period_rank_integer_yyyymm_column() -> None:
+    """PERIOD_RANK_ADDENDUM_01_ORDINAL_RANK.md: an integer YYYYMM period
+    column (e.g. 201801, 201802, ...) must produce one distinct rank per
+    distinct period, keyed on the RAW column value -- not collapse every
+    period onto a single day-formatted string key."""
+    periods = [201801, 201802, 201803, 201804, 201805]
+    df = pd.DataFrame({"period": periods * 4})
+    period_rank = build_period_rank(df, "period")
+    assert len(period_rank) == len(periods), (
+        f"expected {len(periods)} distinct period ranks, got {len(period_rank)}: {period_rank}"
+    )
+    assert period_rank == {p: i for i, p in enumerate(periods)}
+
+
+def test_build_period_rank_string_date_column() -> None:
+    """Same helper, string date column -- the case that already worked."""
+    periods = ["2018-01-01", "2018-02-01", "2018-03-01"]
+    df = pd.DataFrame({"period": periods * 4})
+    period_rank = build_period_rank(df, "period")
+    assert len(period_rank) == len(periods)
+    assert period_rank["2018-01-01"] == 0
+    assert period_rank["2018-02-01"] == 1
+    assert period_rank["2018-03-01"] == 2
 
 
 def test_evaluate_folds_non_numeric_feature_raises_clean_error(

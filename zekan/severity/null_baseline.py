@@ -97,7 +97,7 @@ from zekan.severity.metrics import (
     evaluate_folds,
     remap_fold_active_positions,
 )
-from zekan.severity.splitters import temporal_expanding_folds
+from zekan.severity.splitters import build_period_rank, temporal_expanding_folds
 
 
 # ── Tier 2: sequential/adaptive permutation stopping (Besag-Clifford style) ───
@@ -505,14 +505,7 @@ def _build_interior_fold_set(
     Mirrors the boundary-aware logic in engine.py exactly:
     a fold is terminal when its test_time_max rank > n_periods - 1 - leak_lookahead.
     """
-    sorted_periods = sorted(
-        df[contract.prediction_time].unique(),
-        key=lambda x: pd.to_datetime(x),
-    )
-    period_rank = {
-        pd.Timestamp(p).strftime("%Y-%m-%d"): i
-        for i, p in enumerate(sorted_periods)
-    }
+    period_rank = build_period_rank(df, contract.prediction_time)
     n_periods = len(period_rank)
     cutoff = n_periods - 1 - config.split_policy.leak_lookahead
 
@@ -520,8 +513,8 @@ def _build_interior_fold_set(
     for fold in temp_folds:
         if fold.meta.skipped:
             continue
-        ttm = fold.meta.test_time_max
-        ttm_rank = period_rank.get(ttm) if ttm is not None else None
+        ttm_rank_key = fold.meta.test_time_max_raw
+        ttm_rank = period_rank.get(ttm_rank_key) if ttm_rank_key is not None else None
         is_terminal = ttm_rank is not None and ttm_rank > cutoff
         if not is_terminal:
             interior.add(fold.meta.fold_idx)
